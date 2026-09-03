@@ -61,6 +61,27 @@ export type Trek = {
   elevation_m: number | null
   lat: number | null
   lon: number | null
+  state: string | null
+}
+
+// External search result type (from Wikidata/OSM)
+export type ExternalTrekResult = {
+  id: string
+  name: string
+  lat: number | null
+  lon: number | null
+  elevation_m: number | null
+  description: string
+  source: "wikidata" | "osm"
+  osm_type?: string
+  osm_id?: number
+}
+
+// External search response
+export type ExternalSearchResponse = {
+  results: ExternalTrekResult[]
+  count: number
+  sources: string[]
 }
 
 // ── Fetch all treks ─────────────────────────────────────────
@@ -72,6 +93,21 @@ export async function getTreks(params?: { q?: string; limit?: number }): Promise
   const url = `${API_BASE}/treks${queryString ? `?${queryString}` : ""}`
   const res = await fetch(url)
   if (!res.ok) throw new Error("Failed to load treks")
+  return res.json()
+}
+
+// ── External search (Wikidata + OSM) ─────────────────────────
+export async function searchExternal(
+  q: string,
+  options?: { limit?: number; sources?: string }
+): Promise<ExternalSearchResponse> {
+  const searchParams = new URLSearchParams()
+  searchParams.set("q", q)
+  if (options?.limit) searchParams.set("limit", options.limit.toString())
+  if (options?.sources) searchParams.set("sources", options.sources)
+  const url = `${API_BASE}/search/external?${searchParams.toString()}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error("Failed to search external databases")
   return res.json()
 }
 

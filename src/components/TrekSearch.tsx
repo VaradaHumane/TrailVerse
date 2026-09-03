@@ -101,6 +101,7 @@ export default function TrekSearch({ onSelect, placeholder = "Search for a trek.
               elevation_m: null,
               lat: null,
               lon: null,
+              state: null,
             }
             onSelect(manualTrek)
             setShowDropdown(false)

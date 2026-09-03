@@ -1,9 +1,9 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { Search, MapPin, Mountain, Thermometer, Wind, Droplets, Sun, Clock, ArrowUp, Loader2, AlertTriangle } from "lucide-react"
-import { getTreks } from "@/lib/api"
-import type { Trek } from "@/lib/api"
+import { useState, useEffect, useRef, useCallback } from "react"
+import { Search, MapPin, Mountain, Thermometer, Wind, Droplets, Sun, Clock, ArrowUp, Loader2, AlertTriangle, Globe, Filter, X } from "lucide-react"
+import { getTreks, searchExternal } from "@/lib/api"
+import type { Trek, ExternalTrekResult } from "@/lib/api"
 
 // Weather API response type (matches /weather/{lat}/{lon})
 type WeatherData = {
@@ -43,19 +43,26 @@ type TrekWeatherResponse = {
   risk: RiskData
 }
 
+// Combined result type for display
+type SearchResult = Trek | ExternalTrekResult
+
 type TrekExplorerProps = {}
 
 export default function TrekExplorer({}: TrekExplorerProps) {
   const [query, setQuery] = useState("")
-  const [results, setResults] = useState<Trek[]>([])
+  const [results, setResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
   const [showDropdown, setShowDropdown] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
+  // State filter - default to Maharashtra
+  const [stateFilter, setStateFilter] = useState<string>("Maharashtra")
+  const [showGlobalResults, setShowGlobalResults] = useState(false)
+
   // Selected trek details
-  const [selectedTrek, setSelectedTrek] = useState<Trek | null>(null)
+  const [selectedTrek, setSelectedTrek] = useState<SearchResult | null>(null)
   const [weather, setWeather] = useState<TrekWeatherResponse | null>(null)
   const [weatherLoading, setWeatherLoading] = useState(false)
   const [weatherError, setWeatherError] = useState("")
@@ -73,8 +80,18 @@ export default function TrekExplorer({}: TrekExplorerProps) {
     const timeoutId = setTimeout(async () => {
       setLoading(true)
       try {
-        const data = await getTreks({ q: query, limit: 10 })
-        setResults(data)
+        if (showGlobalResults) {
+          // Search external databases (Wikidata + OSM)
+          const data = await searchExternal(query, { limit: 10, sources: "wikidata,osm" })
+          setResults(data.results)
+        } else {
+          // Search local DB with state filter
+          const data = await getTreks({ q: query, limit: 10 })
+          const filtered = stateFilter
+            ? data.filter(t => t.state?.toLowerCase() === stateFilter.toLowerCase())
+            : data
+          setResults(filtered)
+        }
         setSelectedIndex(-1)
       } catch (err) {
         console.error("Failed to fetch treks:", err)
@@ -85,7 +102,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
     }, 300)
 
     return () => clearTimeout(timeoutId)
-  }, [query])
+  }, [query, stateFilter, showGlobalResults])
 
   // Click outside to close dropdown
   useEffect(() => {
@@ -105,7 +122,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
   }, [])
 
   // Fetch weather for selected trek
-  const fetchWeather = async (trek: Trek) => {
+  const fetchWeather = async (trek: SearchResult) => {
     if (!trek.lat || !trek.lon) {
       setWeatherError("No coordinates available for this trek")
       return
@@ -130,17 +147,18 @@ export default function TrekExplorer({}: TrekExplorerProps) {
     }
   }
 
-  // Generate static map URL (OpenStreetMap static map via staticmap.openstreetmap.de)
-  const generateMapUrl = (trek: Trek) => {
+  // Generate static map URL using OSM tile servers with marker overlay
+  // We'll construct a URL that fetches tiles and uses an iframe approach for better compatibility
+  const generateMapUrl = (trek: SearchResult) => {
     if (!trek.lat || !trek.lon) return
     const zoom = 12
-    const size = "600x300"
-    const url = `https://staticmap.openstreetmap.de/staticmap.php?center=${trek.lat},${trek.lon}&zoom=${zoom}&size=${size}&markers=${trek.lat},${trek.lon},red-pushpin`
+    // Use OSM's export embed which works reliably
+    const url = `https://www.openstreetmap.org/export/embed.html?bbox=${trek.lon - 0.02},${trek.lat - 0.015},${trek.lon + 0.02},${trek.lat + 0.015}&layer=mapnik&marker=${trek.lat},${trek.lon}`
     setMapUrl(url)
   }
 
   // Handle trek selection
-  const handleTrekSelect = (trek: Trek) => {
+  const handleTrekSelect = (trek: SearchResult) => {
     setSelectedTrek(trek)
     setQuery(trek.name)
     setShowDropdown(false)
@@ -185,6 +203,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
             elevation_m: null,
             lat: null,
             lon: null,
+            state: null,
           }
           handleTrekSelect(manualTrek)
         }
@@ -286,6 +305,43 @@ export default function TrekExplorer({}: TrekExplorerProps) {
             )}
           </div>
 
+          {/* State filter and global search toggle */}
+          <div className="flex items-center gap-3 mt-4">
+            <div className="relative">
+              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" aria-hidden="true" />
+              <select
+                value={stateFilter}
+                onChange={(e) => setStateFilter(e.target.value)}
+                className="bg-black border border-white/10 rounded-xl px-10 py-2 pl-8 text-white text-sm focus:outline-none focus:border-emerald-500 transition-colors appearance-none"
+              >
+                <option value="">All States</option>
+                <option value="Maharashtra">Maharashtra</option>
+              </select>
+            </div>
+
+            <button
+              onClick={() => setShowGlobalResults(!showGlobalResults)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                showGlobalResults
+                  ? "bg-emerald-500/20 border border-emerald-500/30 text-emerald-400"
+                  : "bg-white/5 border border-white/10 text-white/70 hover:bg-white/10"
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+              {showGlobalResults ? "Show Local Only" : "Search Global Databases"}
+            </button>
+
+            {stateFilter && (
+              <button
+                onClick={() => setStateFilter("")}
+                className="flex items-center gap-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:bg-white/10 text-sm transition-colors"
+              >
+                <X className="w-3 h-3" />
+                Clear filter
+              </button>
+            )}
+          </div>
+
           {showDropdown && results.length > 0 && (
             <div
               ref={dropdownRef}
@@ -293,36 +349,57 @@ export default function TrekExplorer({}: TrekExplorerProps) {
               className="absolute z-50 w-full mt-2 bg-zinc-900 border border-white/10 rounded-xl shadow-xl overflow-hidden"
               role="listbox"
             >
-              {results.map((trek, index) => (
-                <button
-                  key={trek.id || index}
-                  type="button"
-                  onClick={() => handleTrekSelect(trek)}
-                  onMouseEnter={() => setSelectedIndex(index)}
-                  className={`w-full text-left px-4 py-3 transition-colors ${
-                    index === selectedIndex
-                      ? "bg-emerald-500/20 text-white"
-                      : "text-white/80 hover:bg-white/5"
-                  }`}
-                  role="option"
-                  aria-selected={index === selectedIndex}
-                >
-                  <div className="font-medium">{trek.name}</div>
-                  <div className="text-white/40 text-sm mt-0.5">
-                    {trek.distance_km} km · {trek.location}
-                    {trek.elevation_m && ` · ${trek.elevation_m}m`}
-                  </div>
-                </button>
-              ))}
+              {results.map((trek, index) => {
+                // Handle both Trek (local DB) and ExternalTrekResult types
+                const isExternal = "source" in trek
+                const distance = isExternal ? "" : `${trek.distance_km} km`
+                const location = isExternal ? trek.description : trek.location
+                const elevation = trek.elevation_m ? ` · ${trek.elevation_m}m` : ""
+                const state = isExternal ? ` · ${trek.source}` : (trek.state ? ` · ${trek.state}` : "")
+                const details = [distance, location, elevation, state].filter(Boolean).join(" · ")
+
+                return (
+                  <button
+                    key={trek.id || index}
+                    type="button"
+                    onClick={() => handleTrekSelect(trek)}
+                    onMouseEnter={() => setSelectedIndex(index)}
+                    className={`w-full text-left px-4 py-3 transition-colors ${
+                      index === selectedIndex
+                        ? "bg-emerald-500/20 text-white"
+                        : "text-white/80 hover:bg-white/5"
+                    }`}
+                    role="option"
+                    aria-selected={index === selectedIndex}
+                  >
+                    <div className="font-medium">{trek.name}</div>
+                    <div className="text-white/40 text-sm mt-0.5">{details}</div>
+                  </button>
+                )
+              })}
             </div>
           )}
 
           {showDropdown && query.trim() && results.length === 0 && !loading && (
             <div
               ref={dropdownRef}
-              className="absolute z-50 w-full mt-2 bg-zinc-900 border border-white/10 rounded-xl shadow-xl px-4 py-3 text-white/40 text-sm"
+              className="absolute z-50 w-full mt-2 bg-zinc-900 border border-white/10 rounded-xl shadow-xl px-4 py-3"
             >
-              No treks found. Try different keywords.
+              <p className="text-white/40 text-sm mb-2">
+                No treks found{showGlobalResults ? " in global databases" : ` in ${stateFilter || "database"}`}.
+              </p>
+              {!showGlobalResults && (
+                <button
+                  onClick={() => setShowGlobalResults(true)}
+                  className="text-emerald-400 text-sm hover:underline flex items-center gap-1"
+                >
+                  <Globe className="w-3 h-3" />
+                  Search global databases (Wikidata + OpenStreetMap)
+                </button>
+              )}
+              {showGlobalResults && (
+                <p className="text-white/50 text-xs">Try a different search term or check local database.</p>
+              )}
             </div>
           )}
         </div>
@@ -350,10 +427,10 @@ export default function TrekExplorer({}: TrekExplorerProps) {
                   <h2 className="text-2xl font-bold text-white mb-1">{selectedTrek.name}</h2>
                   <div className="flex items-center gap-2 text-white/50 text-sm">
                     <MapPin className="w-4 h-4" />
-                    {selectedTrek.location || "Location not specified"}
+                    {"source" in selectedTrek ? selectedTrek.description : (selectedTrek.location || "Location not specified")}
                   </div>
                 </div>
-                {selectedTrek.difficulty && (
+                {"difficulty" in selectedTrek && selectedTrek.difficulty && (
                   <div className={`px-3 py-1 rounded-full text-sm font-medium border ${difficultyColor(selectedTrek.difficulty)} border-white/10 bg-white/5`}>
                     {selectedTrek.difficulty}
                   </div>
@@ -366,7 +443,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
                   <div className="text-white/40 text-xs mb-1">Distance</div>
                   <div className="text-white font-semibold flex items-center gap-2">
                     <Mountain className="w-4 h-4 text-emerald-400" />
-                    {selectedTrek.distance_km} km
+                    {"distance_km" in selectedTrek ? `${selectedTrek.distance_km} km` : "N/A"}
                   </div>
                 </div>
                 <div className="bg-black/40 rounded-xl p-4">
@@ -496,32 +573,21 @@ export default function TrekExplorer({}: TrekExplorerProps) {
                 Trek Location
               </h3>
 
-              {!mapUrl && selectedTrek.lat && selectedTrek.lon && (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
-                </div>
-              )}
-
               {!selectedTrek.lat || !selectedTrek.lon ? (
                 <div className="text-white/40 text-sm text-center py-8">
                   No map coordinates available for this trek.
                 </div>
               ) : (
                 <div className="relative rounded-xl overflow-hidden bg-black">
-                  {mapUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={mapUrl}
-                      alt={`Map showing ${selectedTrek.name}`}
-                      className="w-full h-64 object-cover"
-                      onError={() => setMapUrl("")}
-                    />
-                  )}
-                  {!mapUrl && (
-                    <div className="h-64 flex items-center justify-center text-white/40 text-sm">
-                      Map unavailable
-                    </div>
-                  )}
+                  <iframe
+                    src={mapUrl || `https://www.openstreetmap.org/export/embed.html?bbox=${selectedTrek.lon - 0.02},${selectedTrek.lat - 0.015},${selectedTrek.lon + 0.02},${selectedTrek.lat + 0.015}&layer=mapnik&marker=${selectedTrek.lat},${selectedTrek.lon}`}
+                    className="w-full h-64 border-0"
+                    style={{ filter: "brightness(0.9) contrast(1.1)" }}
+                    title={`Map showing ${selectedTrek.name}`}
+                    referrerPolicy="no-referrer"
+                    sandbox="allow-scripts allow-same-origin"
+                    allow="geolocation"
+                  />
                 </div>
               )}
 
