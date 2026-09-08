@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import asyncio
 import os
 import httpx
 
@@ -1043,7 +1044,11 @@ async def search_wikidata(
         search_resp = await client.get(search_url, params=search_params, headers=headers)
 
         if search_resp.status_code != 200:
-            raise HTTPException(status_code=search_resp.status_code, detail=f"Wikidata search error: {search_resp.text}")
+            # Match the fail-open behavior of the other sources: a Wikidata
+            # outage/timeout returns empty results instead of raising, so
+            # /search/external and direct callers never get a 5xx.
+            print(f"[search/wikidata] q={q!r} HTTP {search_resp.status_code}: {search_resp.text[:120]}")
+            return {"results": [], "source": "wikidata", "count": 0, "error": f"Wikidata HTTP {search_resp.status_code}"}
 
         search_data = search_resp.json()
         search_results = search_data.get("search", [])
@@ -1057,19 +1062,30 @@ async def search_wikidata(
         entity_ids = [r["id"] for r in search_results[:limit * 2]]
         entity_details = {}
 
-        # Fetch full entity data for each
-        for entity_id in entity_ids:
-            entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json"
+        # Batch all entity IDs into as few requests as possible via the
+        # wbgetentities API, which accepts pipe-separated QIDs in a single call.
+        # Chunk to stay within the per-request limit (50) for high limits.
+        entity_chunk_size = 50
+        for i in range(0, len(entity_ids), entity_chunk_size):
+            chunk = entity_ids[i:i + entity_chunk_size]
+            entity_params = {
+                "action": "wbgetentities",
+                "ids": "|".join(chunk),
+                "props": "claims|labels|descriptions",
+                "format": "json",
+            }
             try:
-                entity_resp = await client.get(entity_url, headers=headers, timeout=10)
+                entity_resp = await client.get(search_url, params=entity_params, headers=headers, timeout=15)
                 if entity_resp.status_code == 200:
-                    entity_details[entity_id] = entity_resp.json().get("entities", {}).get(entity_id, {})
+                    entity_details.update(entity_resp.json().get("entities", {}))
             except Exception:
                 continue
 
         # Valid type QIDs — trek-relevant landforms across all of India
         # Q8502 = mountain/peak/hill
         # Q1785071 = fort (military construction)
+        # Q23413 = fort (generic)
+        # Q2977485 = hill fort
         # Q57831 = fortress (subclass of fort)
         # Q3969557 = mountain pass
         # Q1572689 = ridge
@@ -1081,8 +1097,9 @@ async def search_wikidata(
         # Q23397 = lake  (high-altitude trek lakes)
         # Q211302 = glacial lake  (e.g. Roopkund)
         valid_types = {
-            "Q8502", "Q1785071", "Q57831", "Q3969557", "Q1572689", "Q3530445",
-            "Q39594", "Q46169", "Q158454", "Q34038", "Q23397", "Q211302",
+            "Q8502", "Q1785071", "Q23413", "Q2977485", "Q57831", "Q3969557",
+            "Q1572689", "Q3530445", "Q39594", "Q46169", "Q158454", "Q34038",
+            "Q23397", "Q211302",
         }
         results = []
 
@@ -1197,27 +1214,38 @@ async def search_osm(
         "https://overpass.openstreetmap.ru/api/interpreter",
     ]
 
-    data = None
-    last_error = None
-
-    for url in overpass_endpoints:
+    async def try_mirror(url: str):
+        """Query a single Overpass mirror; returns (ok: bool, data_or_error)."""
         try:
-            # Very short timeout - OSM is optional, Wikidata is primary
-            async with httpx.AsyncClient(timeout=5) as client:
+            async with httpx.AsyncClient(timeout=3) as client:
                 resp = await client.post(
                     url,
                     data={"data": overpass_query},
                     headers={"Accept": "application/json", "User-Agent": "TrailVerse/1.0"}
                 )
-
             if resp.status_code == 200:
-                data = resp.json()
-                break
-            else:
-                last_error = f"Overpass error ({url}): {resp.text}"
+                return True, resp.json()
+            return False, f"Overpass error ({url}): {resp.text}"
         except Exception as e:
-            last_error = f"Overpass error ({url}): {str(e)}"
-            continue
+            return False, f"Overpass error ({url}): {str(e)}"
+
+    # Race all mirrors concurrently (3s timeout each); take the first success.
+    tasks = [asyncio.ensure_future(try_mirror(u)) for u in overpass_endpoints]
+    data = None
+    last_error = None
+    while tasks:
+        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for fut in done:
+            ok, payload = fut.result()
+            if ok:
+                data = payload
+                # We have our answer - cancel the losers
+                for t in tasks:
+                    t.cancel()
+                break
+            last_error = payload
+        if data is not None:
+            break
 
     if data is None:
         # Return empty results instead of raising - OSM is optional
@@ -1244,39 +1272,283 @@ async def search_osm(
     return {"results": results, "source": "osm", "count": len(results)}
 
 
+@app.get("/search/owm")
+async def search_owm(
+    q: str = Query(..., description="Search query for place names"),
+    limit: int = Query(20, le=50, description="Maximum results")
+):
+    """
+    Search OpenWeatherMap Geocoding API (direct endpoint) for places across India.
+    OWM's geocoding database covers villages, towns, districts and some natural
+    features — a useful third source alongside Wikidata and OSM.
+
+    Note: OWM geocoding does NOT return elevation, so elevation_m is None here.
+    """
+    if not OPENWEATHER_API_KEY:
+        return {"results": [], "source": "owm", "count": 0, "error": "OPENWEATHER_API_KEY not configured"}
+
+    geocode_url = "https://api.openweathermap.org/geo/1.0/direct"
+    params = {
+        "q": f"{q},IN",
+        "limit": limit,
+        "appid": OPENWEATHER_API_KEY,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(geocode_url, params=params)
+        if resp.status_code != 200:
+            return {"results": [], "source": "owm", "count": 0, "error": f"OWM geocoding error: HTTP {resp.status_code}"}
+        data = resp.json()
+    except Exception as e:
+        return {"results": [], "source": "owm", "count": 0, "error": f"OWM geocoding error: {e}"}
+
+    results = []
+    for place in data:
+        lat = place.get("lat")
+        lon = place.get("lon")
+        name = place.get("name")
+        if lat is None or lon is None or not name:
+            continue
+        # Keep only results within the India bbox (global search = all India)
+        if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+            continue
+
+        # Build a short human-readable description from available fields
+        desc_parts = [p for p in [name, place.get("state"), place.get("country")] if p]
+        description = ", ".join(desc_parts)
+
+        results.append({
+            "id": f"owm_{lat}_{lon}",
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "elevation_m": None,  # OWM geocoding does not provide elevation
+            "description": description,
+            "source": "owm",
+        })
+        if len(results) >= limit:
+            break
+
+    return {"results": results, "source": "owm", "count": len(results)}
+
+
+@app.get("/search/nominatim")
+async def search_nominatim(
+    q: str = Query(..., description="Search query for place names"),
+    limit: int = Query(20, le=50, description="Maximum results")
+):
+    """
+    Search OpenStreetMap Nominatim geocoder for trek-relevant places across India.
+
+    Nominatim covers many natural features (valleys, waterfalls, gorges), forts,
+    passes and villages that Wikidata/Overpass may miss. It is distinct from the
+    Overpass API (which searches structured tags rather than place names).
+
+    Results are strictly filtered to trek-relevant OSM classes/types so that
+    nearby businesses (shops, restaurants, offices, gyms) never surface even
+    when their name fuzzy-matches the query.
+    """
+    # Trek-relevant OSM classes. Anything outside this set (amenities, shops,
+    # buildings, highways, offices, landuse, railway, boundary, etc.) is dropped.
+    KEEP_CLASSES = {
+        "natural",      # peaks, valleys, waterfalls, ridges, hills
+        "peak",         # defensive: Nominatim v1 usually returns class=natural/type=peak
+        "waterway",     # rivers, streams, waterfalls
+        "place",        # locality only — see KEEP_TYPES (unpopulated features)
+        "tourism",      # attractions, viewpoints, camp sites
+        "historic",     # forts, castle ruins, monuments
+        "leisure",      # nature reserves, parks
+        # NOTE: populated settlements (village, hamlet, town, city, suburb) are
+        # NOT trek features and are deliberately excluded via KEEP_TYPES below
+        # (a village that shares a trek's name is no more the trek than a city
+        # is). But OSM place=locality means an UNPOPULATED named place — fort
+        # sites, passes, viewpoints, beaches — which is exactly trek-relevant
+        # (e.g. "Rajmachi Fort" is tagged place/locality).
+    }
+    # Within the broad recreation classes, only keep OSM types that are
+    # trek-relevant. This is what kills e.g. "Fitness 4 Ever" (leisure/
+    # fitness_centre), "Ever Green" guest house (tourism/guest_house), an
+    # urban residential "Ever Green Towers Park" (leisure/park) and
+    # "Ever Living Museum" (tourism/museum) while keeping "Sandhan Valley"
+    # (tourism/attraction), "Kedarkantha Base Camp" (tourism/camp_site) and
+    # "Nanda Devi National Park" (leisure/nature_reserve).
+    #
+    # Note: real national parks are tagged leisure/nature_reserve in OSM, so
+    # the generic leisure/park type (urban green spaces) is deliberately
+    # excluded — it is not a trek feature.
+    KEEP_TYPES = {
+        "place": {
+            "locality",  # unpopulated named places: fort sites, passes, viewpoints
+        },
+        "tourism": {
+            "attraction", "viewpoint", "view_point", "camp_site", "picnic_site",
+            "artwork", "alpine_hut", "wilderness_hut", "information",
+        },
+        "leisure": {
+            "garden", "nature_reserve", "common",
+        },
+    }
+
+    geocode_url = "https://nominatim.openstreetmap.org/search"
+    # Ask for more than needed because we filter heavily afterwards.
+    # Nominatim's API allows up to 50 results per request.
+    raw_limit = min(limit * 4, 50)
+    params = {
+        "q": q,
+        "format": "json",
+        "limit": raw_limit,
+        "countrycodes": "in",
+        "addressdetails": 1,
+    }
+    headers = {"User-Agent": "TrailVerse/1.0 (contact: trailverse@app)"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(geocode_url, params=params, headers=headers)
+        if resp.status_code != 200:
+            return {"results": [], "source": "nominatim", "count": 0, "error": f"Nominatim error: HTTP {resp.status_code}"}
+        data = resp.json()
+    except Exception as e:
+        return {"results": [], "source": "nominatim", "count": 0, "error": f"Nominatim error: {e}"}
+
+    # Query words, lowercased, for the name-relevance filter.
+    query_words = {w.lower() for w in q.replace(",", " ").split() if w}
+
+    results = []
+    for place in data:
+        # --- Layer 1: OSM class / type filtering ---
+        place_class = place.get("class")
+        place_type = place.get("type")
+        if place_class not in KEEP_CLASSES:
+            continue
+        if place_class in KEEP_TYPES and place_type not in KEEP_TYPES[place_class]:
+            continue
+
+        try:
+            lat = float(place.get("lat"))
+            lon = float(place.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+            continue
+
+        name = place.get("name") or (place.get("display_name", "").split(",")[0] if place.get("display_name") else "")
+        if not name:
+            continue
+
+        # --- Layer 2: name relevance — at least one query word must appear in
+        # the result's name (catches unrelated named places whose fuzzy match
+        # to the query is incidental).
+        name_lower = name.lower()
+        if query_words and not any(w in name_lower for w in query_words):
+            continue
+
+        description = place.get("display_name", "") or f"OSM {place.get('type', 'place')}"
+
+        results.append({
+            "id": f"nominatim_{place.get('osm_type', 'node')}_{place.get('osm_id')}",
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "elevation_m": None,
+            "description": description,
+            "source": "nominatim",
+            "class": place_class,
+            "osm_type": place.get("osm_type", "node"),
+        })
+        if len(results) >= limit:
+            break
+
+    return {"results": results, "source": "nominatim", "count": len(results)}
+
+
 @app.get("/search/external")
 async def search_external(
     q: str = Query(..., description="Search query for trek names"),
     limit: int = Query(20, le=50, description="Maximum results per source"),
-    sources: str = Query("wikidata,osm", description="Comma-separated: wikidata,osm")
+    sources: str = Query("wikidata,osm,nominatim", description="Comma-separated: wikidata,osm,owm,nominatim")
 ):
     """
-    Combined external search across Wikidata and OSM.
+    Combined external search across Wikidata, OSM, Nominatim, and OWM.
+
+    All sources run concurrently. A failing source returns empty results and
+    never blocks the others; if every source fails the endpoint still returns
+    200 with an empty list.
     """
-    source_list = sources.split(",")
+    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
     all_results = []
 
-    if "wikidata" in source_list:
-        try:
-            wk_resp = await search_wikidata(q=q, limit=limit)
-            all_results.extend(wk_resp["results"])
-        except Exception as e:
-            pass  # Silently skip failed source
-
-    if "osm" in source_list:
+    async def run_source(source: str):
+        """Run a single external source, returning (results, error) without raising."""
+        source = source.strip().lower()
+        if source not in ("wikidata", "osm", "owm", "nominatim"):
+            print(f"[search/external] q={q!r} skipping unknown source: {source!r}")
+            return [], f"unknown source: {source}"
+        if source == "wikidata":
+            try:
+                wk_resp = await search_wikidata(q=q, limit=limit)
+                print(f"[search/external] q={q!r} wikidata: {len(wk_resp['results'])} results")
+                return wk_resp["results"], None
+            except HTTPException as e:
+                print(f"[search/external] q={q!r} wikidata FAILED: HTTP {e.status_code}: {e.detail}")
+                return [], f"wikidata HTTP {e.status_code}"
+            except Exception as e:
+                print(f"[search/external] q={q!r} wikidata ERROR: {type(e).__name__}: {e}")
+                return [], str(e)
+        elif source == "owm":
+            try:
+                owm_resp = await search_owm(q=q, limit=limit)
+                owm_results = owm_resp["results"]
+                owm_err = owm_resp.get("error")
+                print(f"[search/external] q={q!r} owm: {len(owm_results)} results" + (f" | owm error: {owm_err}" if owm_err else ""))
+                return owm_results, owm_err
+            except Exception as e:
+                print(f"[search/external] q={q!r} owm ERROR: {type(e).__name__}: {e}")
+                return [], str(e)
+        elif source == "nominatim":
+            try:
+                nom_resp = await search_nominatim(q=q, limit=limit)
+                nom_results = nom_resp["results"]
+                nom_err = nom_resp.get("error")
+                print(f"[search/external] q={q!r} nominatim: {len(nom_results)} results" + (f" | nominatim error: {nom_err}" if nom_err else ""))
+                return nom_results, nom_err
+            except Exception as e:
+                print(f"[search/external] q={q!r} nominatim ERROR: {type(e).__name__}: {e}")
+                return [], str(e)
+        # default: osm
         try:
             osm_resp = await search_osm(q=q, limit=limit)
-            all_results.extend(osm_resp["results"])
+            osm_results = osm_resp["results"]
+            osm_err = osm_resp.get("error")
+            print(f"[search/external] q={q!r} osm: {len(osm_results)} results" + (f" | osm error: {osm_err}" if osm_err else ""))
+            return osm_results, osm_err
         except Exception as e:
-            pass  # Silently skip failed source
+            print(f"[search/external] q={q!r} osm ERROR: {type(e).__name__}: {e}")
+            return [], str(e)
 
-    # Deduplicate by name (keep first)
+    # Run all requested sources concurrently
+    outcomes = await asyncio.gather(
+        *[run_source(s) for s in source_list],
+        return_exceptions=True,
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, Exception):
+            print(f"[search/external] q={q!r} source raised unexpectedly: {type(outcome).__name__}: {outcome}")
+            continue
+        results, _err = outcome
+        all_results.extend(results)
+
+    # Deduplicate by normalized name (case-insensitive, trimmed) — keeps the
+    # first occurrence so e.g. Nominatim + Wikidata don't return the same place
+    # twice under slightly different casing/whitespace.
     seen = set()
     unique_results = []
     for r in all_results:
-        key = r["name"].lower()
+        key = r["name"].strip().lower()
         if key not in seen:
             seen.add(key)
             unique_results.append(r)
 
+    print(f"[search/external] q={q!r} final: {len(unique_results)} unique results (sources: {','.join(source_list)})")
     return {"results": unique_results[:limit], "count": len(unique_results), "sources": source_list}

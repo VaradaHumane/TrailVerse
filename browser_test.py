@@ -4,13 +4,12 @@ import asyncio
 from playwright.async_api import async_playwright
 
 BASE_URL = "http://localhost:3000"
-API_URL = "http://localhost:8000"
 
 async def test_explore_page():
     async with async_playwright() as p:
-        # Use the downloaded chromium headless shell
+        # Let Playwright resolve its own installed chromium (portable across
+        # machines; no hardcoded user/architecture paths).
         browser = await p.chromium.launch(
-            executable_path="/Users/varada/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell",
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
@@ -45,9 +44,8 @@ async def test_explore_page():
         print(f"   Found {count} local results")
         assert count > 0, "Expected at least 1 local result for Kalsubai"
 
-        # Click first result
+        # Click first result (wait_for below already waits for the card)
         await results.first.click()
-        await page.wait_for_timeout(1000)  # weather fetch
 
         # Verify trek details card appears
         trek_header = page.locator('h2').filter(has_text="Kalsubai")
@@ -84,7 +82,6 @@ async def test_explore_page():
         assert count > 0, "Expected at least 1 local result for Rajmachi"
 
         await results.first.click()
-        await page.wait_for_timeout(1500)  # longer wait for weather + card
 
         # Check the actual header text - might be "Rajmachi Fort Trek"
         trek_header = page.locator('h2').filter(has_text="Rajmachi")
@@ -154,8 +151,11 @@ async def test_explore_page():
         await search_input.fill("NonexistentTrekXYZ123")
         await page.wait_for_timeout(800)
 
-        # The empty state is inside the dropdown div with class
-        empty_state = page.locator('div:has-text("No treks found")').first
+        # The empty-state text is "No treks found in {database|state|global
+        # databases}." get_by_text with exact=False does a deep substring
+        # match — the <p> and its parent <div> both match, but wait_for()
+        # tolerates multiple visible matches, so no .first is needed here.
+        empty_state = page.get_by_text("No treks found", exact=False)
         await empty_state.wait_for(state="visible", timeout=10000)
         print("   ✅ Empty state shown correctly")
 

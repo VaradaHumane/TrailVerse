@@ -46,6 +46,19 @@ type TrekWeatherResponse = {
 // Combined result type for display
 type SearchResult = Trek | ExternalTrekResult
 
+// Deduplicate external results by normalized name (case-insensitive) so the
+// same place from e.g. Nominatim + Wikidata isn't shown twice under slightly
+// different naming/casing.
+function dedupeByName<T extends { name: string }>(results: T[]): T[] {
+  const seen = new Set<string>()
+  return results.filter(r => {
+    const key = r.name.trim().toLowerCase()
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 type TrekExplorerProps = {}
 
 export default function TrekExplorer({}: TrekExplorerProps) {
@@ -77,31 +90,84 @@ export default function TrekExplorer({}: TrekExplorerProps) {
       return
     }
 
+    // Abort HTTP work still in flight when this query is superseded by a new
+    // keystroke (or unmount). Without this a slow source's late response would
+    // clobber whatever the user has typed since.
+    const controller = new AbortController()
+    let cancelled = false
+
     const timeoutId = setTimeout(async () => {
+      const signal = controller.signal
       setLoading(true)
       try {
         if (showGlobalResults) {
-          // Search external databases (Wikidata + OSM)
-          const data = await searchExternal(query, { limit: 10, sources: "wikidata,osm" })
-          setResults(data.results)
+          // Local always wins: check our curated DB first. If a curated trek
+          // matches the query, suppress global results entirely.
+          const localData = await getTreks({ q: query, limit: 10, signal })
+          if (cancelled) return
+          if (localData.length > 0) {
+            setResults(localData)
+          } else {
+            // Purely global query (trek not in our DB) — search each external
+            // database independently so results stream in as each source
+            // responds (Wikidata is usually fastest), instead of waiting for
+            // the slowest one. All sources are merged and deduped by
+            // normalized (case-insensitive) name so e.g. Nominatim and
+            // Wikidata don't return the same place twice. Promise.allSettled
+            // ensures one failing source doesn't block the others.
+            let merged: ExternalTrekResult[] = []
+            const mergeAndRender = (sourceResults: ExternalTrekResult[]) => {
+              if (cancelled) return
+              merged = [...merged, ...sourceResults]
+              setResults(dedupeByName(merged))
+            }
+            const calls = [
+              searchExternal(query, { limit: 10, sources: "wikidata", signal }).then(r => mergeAndRender(r.results)),
+              searchExternal(query, { limit: 10, sources: "nominatim", signal }).then(r => mergeAndRender(r.results)),
+              searchExternal(query, { limit: 10, sources: "osm", signal }).then(r => mergeAndRender(r.results)),
+            ]
+            // End the loading spinner as soon as the FIRST source settles so a
+            // dead-end query doesn't spin for the slowest source (~5s with
+            // Overpass down). Later sources still merge in above.
+            Promise.race(calls.map(c => c.catch(() => {}))).then(() => {
+              if (!cancelled) setLoading(false)
+            })
+            const settled = await Promise.allSettled(calls)
+            settled.forEach((outcome) => {
+              // Skip abort noise — a superseded query's rejections are all
+              // aborts, not real failures.
+              if (outcome.status === "rejected" && !controller.signal.aborted) {
+                console.error("External search source failed:", outcome.reason)
+              }
+            })
+          }
         } else {
           // Search local DB with state filter
-          const data = await getTreks({ q: query, limit: 10 })
+          const data = await getTreks({ q: query, limit: 10, signal })
+          if (cancelled) return
           const filtered = stateFilter
             ? data.filter(t => t.state?.toLowerCase() === stateFilter.toLowerCase())
             : data
           setResults(filtered)
         }
-        setSelectedIndex(-1)
+        if (!cancelled) setSelectedIndex(-1)
       } catch (err) {
+        if (controller.signal.aborted) {
+          // Superseded by a newer query or unmount — nothing to report.
+          return
+        }
         console.error("Failed to fetch treks:", err)
         setResults([])
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }, 300)
 
-    return () => clearTimeout(timeoutId)
+    return () => {
+      clearTimeout(timeoutId)
+      cancelled = true
+      controller.abort()
+    }
   }, [query, stateFilter, showGlobalResults])
 
   // Click outside to close dropdown

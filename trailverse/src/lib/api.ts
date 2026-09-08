@@ -2,6 +2,16 @@
 // In production this would be your deployed API URL
 const API_BASE = "http://localhost:8000"
 
+// ── AbortError helper ───────────────────────────────────────
+// Callers can check `if (err instanceof AbortError)` to distinguish
+// user-initiated cancellations from real failures.
+export class AbortError extends Error {
+  readonly name = "AbortError"
+  constructor(message = "Request was aborted") {
+    super(message)
+  }
+}
+
 // ── Fetch user profile ──
 export async function getUserProfile(username: string) {
   const res = await fetch(`${API_BASE}/users/${username}`)
@@ -72,7 +82,7 @@ export type ExternalTrekResult = {
   lon: number | null
   elevation_m: number | null
   description: string
-  source: "wikidata" | "osm"
+  source: "wikidata" | "osm" | "nominatim"
   osm_type?: string
   osm_id?: number
 }
@@ -85,13 +95,15 @@ export type ExternalSearchResponse = {
 }
 
 // ── Fetch all treks ─────────────────────────────────────────
-export async function getTreks(params?: { q?: string; limit?: number }): Promise<Trek[]> {
+export async function getTreks(
+  params?: { q?: string; limit?: number; signal?: AbortSignal }
+): Promise<Trek[]> {
   const searchParams = new URLSearchParams()
   if (params?.q) searchParams.set("q", params.q)
   if (params?.limit) searchParams.set("limit", params.limit.toString())
   const queryString = searchParams.toString()
   const url = `${API_BASE}/treks${queryString ? `?${queryString}` : ""}`
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: params?.signal })
   if (!res.ok) throw new Error("Failed to load treks")
   return res.json()
 }
@@ -99,14 +111,14 @@ export async function getTreks(params?: { q?: string; limit?: number }): Promise
 // ── External search (Wikidata + OSM) ─────────────────────────
 export async function searchExternal(
   q: string,
-  options?: { limit?: number; sources?: string }
+  options?: { limit?: number; sources?: string; signal?: AbortSignal }
 ): Promise<ExternalSearchResponse> {
   const searchParams = new URLSearchParams()
   searchParams.set("q", q)
   if (options?.limit) searchParams.set("limit", options.limit.toString())
   if (options?.sources) searchParams.set("sources", options.sources)
   const url = `${API_BASE}/search/external?${searchParams.toString()}`
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: options?.signal })
   if (!res.ok) throw new Error("Failed to search external databases")
   return res.json()
 }
