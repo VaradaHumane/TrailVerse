@@ -300,7 +300,7 @@ export default function TrekExplorer() {
       case "red": return "text-red-400 border-red-400/30 bg-red-400/10"
       case "amber": return "text-amber-400 border-amber-400/30 bg-amber-400/10"
       case "green": return "text-emerald-400 border-emerald-400/30 bg-emerald-400/10"
-      default: return "text-white/60 border-white/10 bg-white/5"
+      default: return "text-amber-400 border-amber-400/30 bg-amber-400/10"
     }
   }
 
@@ -538,12 +538,25 @@ export default function TrekExplorer() {
                   {/* Main weather display */}
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-4xl font-bold text-white">{Math.round(weather.weather.temp)}°C</div>
-                      <div className="text-white/50 text-sm capitalize">{weather.weather.weather_desc}</div>
+                      <div className="text-4xl font-bold text-white">
+                        {weather.weather.temp !== null && weather.weather.temp !== undefined
+                          ? `${Math.round(weather.weather.temp)}°C`
+                          : "--"}
+                      </div>
+                      <div className="text-white/50 text-sm capitalize">
+                        {weather.weather.weather_desc || "Weather data available"}
+                      </div>
                     </div>
                     <div className="text-right text-white/60 text-sm">
-                      <div>Feels like {Math.round(weather.weather.feels_like)}°C</div>
-                      <div>H: {Math.round(weather.weather.temp_max)}° L: {Math.round(weather.weather.temp_min)}°</div>
+                      <div>
+                        Feels like {weather.weather.feels_like !== null && weather.weather.feels_like !== undefined
+                          ? `${Math.round(weather.weather.feels_like)}°C`
+                          : "--"}
+                      </div>
+                      <div>
+                        H: {weather.weather.temp_max !== null && weather.weather.temp_max !== undefined ? `${Math.round(weather.weather.temp_max)}°` : "--"}{" "}
+                        L: {weather.weather.temp_min !== null && weather.weather.temp_min !== undefined ? `${Math.round(weather.weather.temp_min)}°` : "--"}
+                      </div>
                     </div>
                   </div>
 
@@ -553,25 +566,41 @@ export default function TrekExplorer() {
                       <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
                         <Wind className="w-3 h-3" /> Wind
                       </div>
-                      <div className="text-white text-sm font-medium">{weather.weather.wind_speed} m/s</div>
+                      <div className="text-white text-sm font-medium">
+                        {weather.weather.wind_speed !== null && weather.weather.wind_speed !== undefined
+                          ? `${weather.weather.wind_speed} m/s`
+                          : "--"}
+                      </div>
                     </div>
                     <div className="bg-black/40 rounded-lg p-3">
                       <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
                         <Droplets className="w-3 h-3" /> Humidity
                       </div>
-                      <div className="text-white text-sm font-medium">{weather.weather.humidity}%</div>
+                      <div className="text-white text-sm font-medium">
+                        {weather.weather.humidity !== null && weather.weather.humidity !== undefined
+                          ? `${weather.weather.humidity}%`
+                          : "--"}
+                      </div>
                     </div>
                     <div className="bg-black/40 rounded-lg p-3">
                       <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
                         <Sun className="w-3 h-3" /> Pressure
                       </div>
-                      <div className="text-white text-sm font-medium">{weather.weather.pressure} hPa</div>
+                      <div className="text-white text-sm font-medium">
+                        {weather.weather.pressure !== null && weather.weather.pressure !== undefined
+                          ? `${weather.weather.pressure} hPa`
+                          : "--"}
+                      </div>
                     </div>
                     <div className="bg-black/40 rounded-lg p-3">
                       <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
                         <Clock className="w-3 h-3" /> Visibility
                       </div>
-                      <div className="text-white text-sm font-medium">{(weather.weather.visibility / 1000).toFixed(1)} km</div>
+                      <div className="text-white text-sm font-medium">
+                        {weather.weather.visibility !== null && weather.weather.visibility !== undefined
+                          ? `${(weather.weather.visibility / 1000).toFixed(1)} km`
+                          : "--"}
+                      </div>
                     </div>
                   </div>
 
@@ -588,20 +617,20 @@ export default function TrekExplorer() {
                   </div>
 
                   {/* Risk Assessment */}
-                  <div className={`rounded-xl p-4 border ${riskColor(weather.risk.color)}`}>
+                  <div className={`rounded-xl p-4 border ${riskColor(weather.risk?.color || "amber")}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-semibold">Trek Risk Assessment</span>
                       <span className="text-xl font-bold">
-                        {weather.risk.score !== null && weather.risk.score !== undefined
+                        {weather.risk?.score !== null && weather.risk?.score !== undefined
                           ? `${weather.risk.score}/100`
                           : "N/A"}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 mb-3">
                       <AlertTriangle className="w-4 h-4" />
-                      <span className="font-medium">{weather.risk.label}</span>
+                      <span className="font-medium">{weather.risk?.label || "Incomplete Data"}</span>
                     </div>
-                    {weather.risk.factors.length > 0 && (
+                    {(weather.risk?.factors?.length ?? 0) > 0 && (
                       <div className="space-y-1">
                         {weather.risk.factors.map((factor, idx) => (
                           <div key={idx} className="text-sm text-white/70 flex items-center gap-2">
