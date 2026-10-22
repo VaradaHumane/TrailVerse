@@ -96,10 +96,11 @@ export type ExternalSearchResponse = {
 
 // ── Fetch all treks ─────────────────────────────────────────
 export async function getTreks(
-  params?: { q?: string; limit?: number; signal?: AbortSignal }
+  params?: { q?: string; state?: string; limit?: number; signal?: AbortSignal }
 ): Promise<Trek[]> {
   const searchParams = new URLSearchParams()
   if (params?.q) searchParams.set("q", params.q)
+  if (params?.state) searchParams.set("state", params.state)
   if (params?.limit) searchParams.set("limit", params.limit.toString())
   const queryString = searchParams.toString()
   const url = `${API_BASE}/treks${queryString ? `?${queryString}` : ""}`

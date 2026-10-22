@@ -1,7 +1,7 @@
 "use client"
 
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback, useSyncExternalStore } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -12,6 +12,19 @@ import {
   getGroup, joinGroup, addMember, getMessages, postMessage,
   getQueries, postQuery, postReply, leaveGroup,
 } from "@/lib/api"
+
+function subscribe(callback: () => void) {
+  window.addEventListener("storage", callback)
+  return () => window.removeEventListener("storage", callback)
+}
+
+function getSnapshot() {
+  return localStorage.getItem("username")
+}
+
+function getServerSnapshot() {
+  return null
+}
 
 type ItineraryDay = {
   day: number
@@ -64,12 +77,12 @@ export default function GroupDetailPage() {
   const router = useRouter()
   const groupId = params.id as string
 
+  const username = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
   const [group, setGroup] = useState<Group | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [isHost, setIsHost] = useState(false)
   const [isMember, setIsMember] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [username, setUsername] = useState<string | null>(null)
 
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState("")
@@ -86,38 +99,40 @@ export default function GroupDetailPage() {
   const [actionError, setActionError] = useState("")
   const [leaving, setLeaving] = useState(false)
 
-  const loadGroup = (user: string | null) => {
-    getGroup(groupId, user || undefined)
+  const loadGroup = useCallback(() => {
+    getGroup(groupId, username || undefined)
       .then((data) => {
         setGroup(data.group)
         setMembers(data.members)
         setIsHost(data.is_host)
         setIsMember(data.is_member)
-        setLoading(false)
       })
-      .catch(() => setLoading(false))
-  }
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [groupId, username])
 
-  const loadMessages = () => {
-    getMessages(groupId).then((data) => setMessages(data.messages))
-  }
+  const loadMessages = useCallback(() => {
+    getMessages(groupId)
+      .then((data) => setMessages(data.messages))
+      .catch(() => {})
+  }, [groupId])
 
-  const loadQueries = (user: string) => {
-    getQueries(groupId, user).then((data) => setQueries(data.queries))
-  }
+  const loadQueries = useCallback((user: string) => {
+    getQueries(groupId, user)
+      .then((data) => setQueries(data.queries))
+      .catch(() => {})
+  }, [groupId])
 
   useEffect(() => {
-    const stored = localStorage.getItem("username")
-    setUsername(stored)
-    loadGroup(stored)
+    loadGroup()
     loadMessages()
-  }, [groupId])
+  }, [loadGroup, loadMessages])
 
   useEffect(() => {
     if (username && (isMember || isHost)) {
       loadQueries(username)
     }
-  }, [username, isMember, isHost])
+  }, [username, isMember, isHost, loadQueries])
 
   const handleJoin = async () => {
     if (!username) {
@@ -127,9 +142,9 @@ export default function GroupDetailPage() {
     setActionError("")
     try {
       await joinGroup(groupId, username)
-      loadGroup(username)
-    } catch (err: any) {
-      setActionError(err.message)
+      loadGroup()
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to join group")
     }
   }
 
@@ -140,9 +155,9 @@ export default function GroupDetailPage() {
     setActionError("")
     try {
       await leaveGroup(groupId, username)
-      loadGroup(username)
-    } catch (err: any) {
-      setActionError(err.message)
+      loadGroup()
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to leave group")
     } finally {
       setLeaving(false)
     }
@@ -156,9 +171,9 @@ export default function GroupDetailPage() {
     try {
       await addMember(groupId, username, addUsername.trim())
       setAddUsername("")
-      loadGroup(username)
-    } catch (err: any) {
-      setActionError(err.message)
+      loadGroup()
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to add member")
     } finally {
       setAddingMember(false)
     }
@@ -172,8 +187,8 @@ export default function GroupDetailPage() {
       await postMessage(groupId, username, newMessage.trim())
       setNewMessage("")
       loadMessages()
-    } catch (err: any) {
-      setActionError(err.message)
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to post message")
     } finally {
       setPostingMessage(false)
     }
@@ -187,8 +202,8 @@ export default function GroupDetailPage() {
       await postQuery(groupId, username, newQuestion.trim())
       setNewQuestion("")
       loadQueries(username)
-    } catch (err: any) {
-      setActionError(err.message)
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to post question")
     } finally {
       setPostingQuestion(false)
     }
@@ -199,10 +214,10 @@ export default function GroupDetailPage() {
     if (!username || !draft?.trim()) return
     try {
       await postReply(groupId, queryId, username, draft.trim())
-      setReplyDrafts({ ...replyDrafts, [queryId]: "" })
+      setReplyDrafts((prev) => ({ ...prev, [queryId]: "" }))
       loadQueries(username)
-    } catch (err: any) {
-      setActionError(err.message)
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Failed to post reply")
     }
   }
 
@@ -281,7 +296,7 @@ export default function GroupDetailPage() {
             {isHost && (
                 <div className="flex items-center gap-2 shrink-0">
                     <span className="text-amber-400 text-sm font-semibold bg-amber-500/10 border border-amber-500/20 px-4 py-2 rounded-full">
-                     You're the host
+                     You&apos;re the host
                     </span>
                     <Link
                         href={`/groups/${groupId}/edit`}

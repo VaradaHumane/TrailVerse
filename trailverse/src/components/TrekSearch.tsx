@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Search, ChevronDown, Loader2 } from "lucide-react"
+import { Search, Loader2, ChevronDown } from "lucide-react"
 import { getTreks } from "@/lib/api"
 import type { Trek } from "@/lib/api"
 
@@ -23,8 +23,8 @@ export default function TrekSearch({ onSelect, placeholder = "Search for a trek.
   // Debounced fetch
   useEffect(() => {
     if (!query.trim()) {
-      setResults([])
-      return
+      const id = setTimeout(() => setResults([]), 0)
+      return () => clearTimeout(id)
     }
 
     const timeoutId = setTimeout(async () => {
@@ -43,6 +43,7 @@ export default function TrekSearch({ onSelect, placeholder = "Search for a trek.
 
     return () => clearTimeout(timeoutId)
   }, [query])
+
 
   // Click outside to close
   useEffect(() => {
@@ -176,7 +177,7 @@ export default function TrekSearch({ onSelect, placeholder = "Search for a trek.
           role="listbox"
         >
           {results.length === 0 && query.trim() ? (
-            <div className="px-4 py-3 text-white/40 text-sm" role="option" aria-disabled="true">
+            <div className="px-4 py-3 text-white/40 text-sm">
               No treks found. Try different keywords.
             </div>
           ) : (

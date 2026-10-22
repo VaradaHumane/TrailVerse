@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Search, MapPin, Mountain, Thermometer, Wind, Droplets, Sun, Clock, ArrowUp, Loader2, AlertTriangle, Globe, Filter, X } from "lucide-react"
 import { getTreks, searchExternal } from "@/lib/api"
 import type { Trek, ExternalTrekResult } from "@/lib/api"
@@ -32,7 +32,7 @@ type WeatherData = {
 }
 
 type RiskData = {
-  score: number
+  score: number | null
   label: string
   color: string
   factors: { label: string; severity: string }[]
@@ -59,9 +59,7 @@ function dedupeByName<T extends { name: string }>(results: T[]): T[] {
   })
 }
 
-type TrekExplorerProps = {}
-
-export default function TrekExplorer({}: TrekExplorerProps) {
+export default function TrekExplorer() {
   const [query, setQuery] = useState("")
   const [results, setResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
@@ -70,7 +68,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  // State filter - default to Maharashtra
+  // State filter - default to Maharashtra (local mode)
   const [stateFilter, setStateFilter] = useState<string>("Maharashtra")
   const [showGlobalResults, setShowGlobalResults] = useState(false)
 
@@ -86,13 +84,12 @@ export default function TrekExplorer({}: TrekExplorerProps) {
   // Debounced fetch of treks
   useEffect(() => {
     if (!query.trim()) {
-      setResults([])
-      return
+      const id = setTimeout(() => setResults([]), 0)
+      return () => clearTimeout(id)
     }
 
     // Abort HTTP work still in flight when this query is superseded by a new
-    // keystroke (or unmount). Without this a slow source's late response would
-    // clobber whatever the user has typed since.
+    // keystroke (or unmount).
     const controller = new AbortController()
     let cancelled = false
 
@@ -101,20 +98,14 @@ export default function TrekExplorer({}: TrekExplorerProps) {
       setLoading(true)
       try {
         if (showGlobalResults) {
-          // Local always wins: check our curated DB first. If a curated trek
-          // matches the query, suppress global results entirely.
+          // Local always wins: check curated DB first. If a curated trek
+          // matches the query, display curated local match.
           const localData = await getTreks({ q: query, limit: 10, signal })
           if (cancelled) return
           if (localData.length > 0) {
             setResults(localData)
           } else {
-            // Purely global query (trek not in our DB) — search each external
-            // database independently so results stream in as each source
-            // responds (Wikidata is usually fastest), instead of waiting for
-            // the slowest one. All sources are merged and deduped by
-            // normalized (case-insensitive) name so e.g. Nominatim and
-            // Wikidata don't return the same place twice. Promise.allSettled
-            // ensures one failing source doesn't block the others.
+            // Global search across India external databases
             let merged: ExternalTrekResult[] = []
             const mergeAndRender = (sourceResults: ExternalTrekResult[]) => {
               if (cancelled) return
@@ -126,34 +117,27 @@ export default function TrekExplorer({}: TrekExplorerProps) {
               searchExternal(query, { limit: 10, sources: "nominatim", signal }).then(r => mergeAndRender(r.results)),
               searchExternal(query, { limit: 10, sources: "osm", signal }).then(r => mergeAndRender(r.results)),
             ]
-            // End the loading spinner as soon as the FIRST source settles so a
-            // dead-end query doesn't spin for the slowest source (~5s with
-            // Overpass down). Later sources still merge in above.
+            // End loading spinner as soon as first source settles
             Promise.race(calls.map(c => c.catch(() => {}))).then(() => {
               if (!cancelled) setLoading(false)
             })
             const settled = await Promise.allSettled(calls)
             settled.forEach((outcome) => {
-              // Skip abort noise — a superseded query's rejections are all
-              // aborts, not real failures.
               if (outcome.status === "rejected" && !controller.signal.aborted) {
                 console.error("External search source failed:", outcome.reason)
               }
             })
           }
         } else {
-          // Search local DB with state filter
-          const data = await getTreks({ q: query, limit: 10, signal })
+          // Search local DB with state filter (enforce Maharashtra)
+          const stateParam = stateFilter || "Maharashtra"
+          const data = await getTreks({ q: query, state: stateParam, limit: 10, signal })
           if (cancelled) return
-          const filtered = stateFilter
-            ? data.filter(t => t.state?.toLowerCase() === stateFilter.toLowerCase())
-            : data
-          setResults(filtered)
+          setResults(data)
         }
         if (!cancelled) setSelectedIndex(-1)
       } catch (err) {
         if (controller.signal.aborted) {
-          // Superseded by a newer query or unmount — nothing to report.
           return
         }
         console.error("Failed to fetch treks:", err)
@@ -206,22 +190,21 @@ export default function TrekExplorer({}: TrekExplorerProps) {
       }
       const data: TrekWeatherResponse = await res.json()
       setWeather(data)
-    } catch (err: any) {
-      setWeatherError(err.message)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to load weather"
+      setWeatherError(message)
     } finally {
       setWeatherLoading(false)
     }
   }
 
   // Generate static map URL using OSM tile servers with marker overlay
-  // We'll construct a URL that fetches tiles and uses an iframe approach for better compatibility
   const generateMapUrl = (trek: SearchResult) => {
     if (!trek.lat || !trek.lon) return
-    const zoom = 12
-    // Use OSM's export embed which works reliably
     const url = `https://www.openstreetmap.org/export/embed.html?bbox=${trek.lon - 0.02},${trek.lat - 0.015},${trek.lon + 0.02},${trek.lat + 0.015}&layer=mapnik&marker=${trek.lat},${trek.lon}`
     setMapUrl(url)
   }
+
 
   // Handle trek selection
   const handleTrekSelect = (trek: SearchResult) => {
@@ -372,7 +355,7 @@ export default function TrekExplorer({}: TrekExplorerProps) {
           </div>
 
           {/* State filter and global search toggle */}
-          <div className="flex items-center gap-3 mt-4">
+          <div className="flex flex-wrap items-center gap-3 mt-4">
             <div className="relative">
               <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" aria-hidden="true" />
               <select
@@ -608,7 +591,11 @@ export default function TrekExplorer({}: TrekExplorerProps) {
                   <div className={`rounded-xl p-4 border ${riskColor(weather.risk.color)}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-semibold">Trek Risk Assessment</span>
-                      <span className="text-xl font-bold">{weather.risk.score}/100</span>
+                      <span className="text-xl font-bold">
+                        {weather.risk.score !== null && weather.risk.score !== undefined
+                          ? `${weather.risk.score}/100`
+                          : "N/A"}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2 mb-3">
                       <AlertTriangle className="w-4 h-4" />

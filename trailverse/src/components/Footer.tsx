@@ -21,32 +21,40 @@ export default function Footer() {
           </div>
 
           {/* Link columns */}
-          {/* <div className="flex gap-16">
+          <div className="flex gap-12">
             <div>
-              <p className="text-white text-sm font-semibold mb-3">Product</p>
-              {["Features", "Rankings", "Community", "AI Tools"].map((item) => (
+              <p className="text-white text-sm font-semibold mb-3">Explore</p>
+              {[
+                { name: "Explore Treks", href: "/explore" },
+                { name: "Trek Groups", href: "/groups" },
+                { name: "Features", href: "/#features" },
+              ].map((item) => (
                 <Link
-                  key={item}
-                  href="#"
+                  key={item.name}
+                  href={item.href}
                   className="block text-white/40 text-sm hover:text-white transition-colors mb-2"
                 >
-                  {item}
+                  {item.name}
                 </Link>
               ))}
             </div>
             <div>
-              <p className="text-white text-sm font-semibold mb-3">Company</p>
-              {["About", "Blog", "Careers", "Contact"].map((item) => (
+              <p className="text-white text-sm font-semibold mb-3">Community</p>
+              {[
+                { name: "Dashboard", href: "/dashboard" },
+                { name: "Host a Trek", href: "/groups/create" },
+                { name: "Login", href: "/login" },
+              ].map((item) => (
                 <Link
-                  key={item}
-                  href="#"
+                  key={item.name}
+                  href={item.href}
                   className="block text-white/40 text-sm hover:text-white transition-colors mb-2"
                 >
-                  {item}
+                  {item.name}
                 </Link>
               ))}
             </div>
-          </div> */}
+          </div>
         </div>
 
         {/* Bottom row: copyright */}

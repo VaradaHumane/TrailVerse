@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { Mountain, Plus, TrendingUp, Users, Compass, AlertTriangle } from "lucide-react"
+import { Mountain, Plus, TrendingUp, Users, Compass } from "lucide-react"
 import Link from "next/link"
 import { getDashboardData, getUserGroups } from "@/lib/api"
 import LogTrekModal from "@/components/LogTrekModal"
@@ -29,10 +29,10 @@ type Trek = {
   elevation_m: number
 }
 
-const riskColor: Record<string, string> = {
-  Safe:      "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
+const difficultyColor: Record<string, string> = {
+  Easy:      "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
   Moderate:  "text-amber-400   bg-amber-400/10   border-amber-400/20",
-  Dangerous: "text-red-400     bg-red-400/10     border-red-400/20",
+  Hard:      "text-red-400     bg-red-400/10     border-red-400/20",
 }
 
 export default function DashboardPage() {
@@ -44,7 +44,7 @@ export default function DashboardPage() {
   const [showModal, setShowModal]     = useState(false)
   const [myGroupsCount, setMyGroupsCount] = useState({ hosted: 0, joined: 0 })
 
-  const fetchDashboard = () => {
+  const fetchDashboard = useCallback(() => {
     const username = localStorage.getItem("username")
 
     if (!username) {
@@ -57,9 +57,9 @@ export default function DashboardPage() {
         setUser(data.user)
         setLeaderboard(data.leaderboard)
         setRecommended(data.recommended_trek)
-        setLoading(false)
       })
-      .catch(() => setLoading(false))
+      .catch(() => {})
+      .finally(() => setLoading(false))
 
     getUserGroups(username)
       .then((data) => {
@@ -69,11 +69,16 @@ export default function DashboardPage() {
         })
       })
       .catch(() => {})
-  }
+  }, [router])
 
   useEffect(() => {
     fetchDashboard()
-  }, [])
+  }, [fetchDashboard])
+
+  const handleRetry = () => {
+    setLoading(true)
+    fetchDashboard()
+  }
 
   if (loading) return (
     <div className="min-h-screen bg-black flex items-center justify-center">
@@ -82,8 +87,14 @@ export default function DashboardPage() {
   )
 
   if (!user) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-4">
       <div className="text-red-400">Failed to load dashboard</div>
+      <button
+        onClick={handleRetry}
+        className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg text-sm transition-colors"
+      >
+        Retry
+      </button>
     </div>
   )
 
@@ -172,9 +183,9 @@ export default function DashboardPage() {
                     </p>
                   </div>
 
-                  <div className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border shrink-0 ${riskColor["Safe"]}`}>
-                    <AlertTriangle className="w-3 h-3" />
-                    Safe
+                  <div className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border shrink-0 ${difficultyColor[recommended.difficulty] || "text-emerald-400 bg-emerald-400/10 border-emerald-400/20"}`}>
+                    <Compass className="w-3.5 h-3.5" />
+                    {recommended.difficulty || "Recommended"}
                   </div>
                 </div>
               </div>

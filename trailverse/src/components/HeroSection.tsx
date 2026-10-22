@@ -22,7 +22,7 @@ export default function HeroSection() {
         {/* Small badge at the top */}
         <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs px-3 py-1 rounded-full mb-6">
           <Star className="w-3 h-3 fill-current" />
-          India's first professional trekking network
+          India&apos;s first professional trekking network
         </div>
 
         {/* Main headline */}

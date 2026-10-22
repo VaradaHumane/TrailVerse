@@ -34,8 +34,8 @@ export default function SignupPage() {
       // Store username in localStorage so dashboard knows who's logged in
       localStorage.setItem("username", formData.username)
       router.push("/dashboard")
-    } catch (err: any) {
-      setError(err.message)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Signup failed")
     } finally {
       setLoading(false)
     }

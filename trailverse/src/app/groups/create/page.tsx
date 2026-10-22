@@ -71,8 +71,8 @@ export default function CreateGroupPage() {
         itinerary: itinerary.filter((d) => d.title.trim() !== ""),
       })
       router.push(`/groups/${result.group.id}`)
-    } catch (err: any) {
-      setError(err.message || "Something went wrong")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Something went wrong")
       setSubmitting(false)
     }
   }
