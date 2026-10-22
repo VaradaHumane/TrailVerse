@@ -141,15 +141,20 @@ class TrekOut(BaseModel):
 @app.get("/treks", response_model=list[TrekOut])
 def list_treks(
     q: str | None = Query(None, description="Search query (matches against name and location)"),
+    state: str | None = Query(None, description="State filter (e.g. Maharashtra)"),
     limit: int = Query(20, le=100, description="Maximum number of results to return")
 ):
     """
-    Get treks with optional search query.
+    Get treks with optional search query and state filter.
     - q: search query (matches against name, location)
+    - state: state filter (case-insensitive)
     - limit: max results to return (default 20, max 100)
     """
     select_fields = "id, name, difficulty, distance_km, location, elevation_m, lat, lon, state"
     query = supabase.table("treks").select(select_fields)
+
+    if state:
+        query = query.ilike("state", state)
 
     if q:
         # Search in name and location (case-insensitive)
@@ -766,31 +771,149 @@ def get_user_groups(username: str):
 # WEATHER + TREK RISK
 # ============================================================
 
+def _normalize_owm_response(raw: dict) -> dict:
+    """
+    Safely extract and normalize weather fields from raw OpenWeatherMap response.
+    Normalizes 3-hour precipitation (rain/snow) to hourly equivalents if 1h is absent.
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    main = raw.get("main") if isinstance(raw.get("main"), dict) else {}
+    wind = raw.get("wind") if isinstance(raw.get("wind"), dict) else {}
+    weather_list = raw.get("weather") if isinstance(raw.get("weather"), list) else []
+    first_weather = weather_list[0] if (weather_list and isinstance(weather_list[0], dict)) else {}
+    sys = raw.get("sys") if isinstance(raw.get("sys"), dict) else {}
+    clouds = raw.get("clouds") if isinstance(raw.get("clouds"), dict) else {}
+    rain = raw.get("rain") if isinstance(raw.get("rain"), dict) else {}
+    snow = raw.get("snow") if isinstance(raw.get("snow"), dict) else {}
+
+    # Rain normalization (1h or 3h / 3)
+    rain_1h = 0.0
+    if "1h" in rain:
+        try:
+            rain_1h = float(rain["1h"])
+        except (ValueError, TypeError):
+            pass
+    elif "3h" in rain:
+        try:
+            rain_1h = float(rain["3h"]) / 3.0
+        except (ValueError, TypeError):
+            pass
+
+    # Snow normalization (1h or 3h / 3)
+    snow_1h = 0.0
+    if "1h" in snow:
+        try:
+            snow_1h = float(snow["1h"])
+        except (ValueError, TypeError):
+            pass
+    elif "3h" in snow:
+        try:
+            snow_1h = float(snow["3h"]) / 3.0
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "temp": main.get("temp"),
+        "feels_like": main.get("feels_like"),
+        "temp_min": main.get("temp_min"),
+        "temp_max": main.get("temp_max"),
+        "humidity": main.get("humidity"),
+        "pressure": main.get("pressure"),
+        "visibility": raw.get("visibility", 10000),
+        "wind_speed": wind.get("speed", 0.0),
+        "wind_deg": wind.get("deg", 0),
+        "wind_gust": wind.get("gust"),
+        "clouds": clouds.get("all", 0),
+        "rain_1h": rain_1h,
+        "snow_1h": snow_1h,
+        "weather_id": first_weather.get("id", 800),
+        "weather_main": first_weather.get("main", "Clear"),
+        "weather_desc": first_weather.get("description", "clear sky"),
+        "weather_icon": first_weather.get("icon", "01d"),
+        "sunrise": sys.get("sunrise"),
+        "sunset": sys.get("sunset"),
+        "uvi": raw.get("uvi", 0),
+        "location_name": raw.get("name", ""),
+        "country": sys.get("country", ""),
+        "dt": raw.get("dt"),
+    }
+
+
 def _compute_trek_risk(weather: dict) -> dict:
     """
     Heuristic risk score (0–100) built from live weather data.
-    Returns score, label, colour, and contributing factors.
+    Evaluates 7 weather signals: wind, rain, snow, visibility, temperature,
+    thunderstorm, and UV index.
+
+    Missing or invalid data is never treated as safe. Returns score, label,
+    color, and contributing factors.
     """
+    if not weather or not isinstance(weather, dict):
+        return {
+            "score": None,
+            "label": "Incomplete Data",
+            "color": "amber",
+            "factors": [{"label": "Weather data unavailable — conditions unverified", "severity": "medium"}],
+        }
+
+    def safe_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    def safe_int(val):
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+
+    temp = safe_float(weather.get("temp"))
+    wind_speed = safe_float(weather.get("wind_speed"))
+    visibility = safe_float(weather.get("visibility"))
+    rain_1h = safe_float(weather.get("rain_1h")) or 0.0
+    snow_1h = safe_float(weather.get("snow_1h")) or 0.0
+    weather_id = safe_int(weather.get("weather_id"))
+    uvi = safe_float(weather.get("uvi")) or 0.0
+
     score = 0
     factors = []
+    missing_critical = []
 
-    wind_speed  = weather.get("wind_speed", 0)       # m/s
-    visibility  = weather.get("visibility", 10000)   # metres
-    rain_1h     = weather.get("rain_1h", 0)          # mm
-    snow_1h     = weather.get("snow_1h", 0)          # mm
-    temp        = weather.get("temp", 20)            # °C
-    weather_id  = weather.get("weather_id", 800)     # OWM condition code
-    uvi         = weather.get("uvi", 0)              # UV index
+    if temp is None:
+        missing_critical.append("temperature")
+    if wind_speed is None:
+        missing_critical.append("wind speed")
+    if weather_id is None:
+        missing_critical.append("weather condition")
 
-    # Wind
-    if wind_speed >= 17:
-        score += 30
-        factors.append({"label": "Dangerous wind speeds", "severity": "high"})
-    elif wind_speed >= 10:
-        score += 15
-        factors.append({"label": "Strong winds", "severity": "medium"})
+    # If critical signals are missing, data cannot be evaluated as safe
+    if len(missing_critical) >= 2 or (temp is None and wind_speed is None):
+        return {
+            "score": None,
+            "label": "Incomplete Data",
+            "color": "amber",
+            "factors": [{"label": f"Missing critical signals ({', '.join(missing_critical)}) — exercise caution", "severity": "medium"}],
+        }
 
-    # Rain
+    # 1. Wind Signal
+    if wind_speed is not None:
+        if wind_speed >= 17:
+            score += 30
+            factors.append({"label": "Dangerous wind speeds", "severity": "high"})
+        elif wind_speed >= 10:
+            score += 15
+            factors.append({"label": "Strong winds", "severity": "medium"})
+    else:
+        factors.append({"label": "Wind speed data unavailable", "severity": "low"})
+
+    # 2. Rain Signal
     if rain_1h >= 10:
         score += 25
         factors.append({"label": "Heavy rainfall", "severity": "high"})
@@ -801,7 +924,7 @@ def _compute_trek_risk(weather: dict) -> dict:
         score += 5
         factors.append({"label": "Light rain", "severity": "low"})
 
-    # Snow
+    # 3. Snow Signal
     if snow_1h >= 5:
         score += 30
         factors.append({"label": "Heavy snowfall", "severity": "high"})
@@ -809,37 +932,44 @@ def _compute_trek_risk(weather: dict) -> dict:
         score += 15
         factors.append({"label": "Snowfall present", "severity": "medium"})
 
-    # Visibility
-    if visibility < 500:
-        score += 25
-        factors.append({"label": "Near-zero visibility", "severity": "high"})
-    elif visibility < 1000:
-        score += 15
-        factors.append({"label": "Poor visibility", "severity": "medium"})
-    elif visibility < 3000:
-        score += 5
-        factors.append({"label": "Reduced visibility", "severity": "low"})
+    # 4. Visibility Signal
+    if visibility is not None:
+        if visibility < 500:
+            score += 25
+            factors.append({"label": "Near-zero visibility", "severity": "high"})
+        elif visibility < 1000:
+            score += 15
+            factors.append({"label": "Poor visibility", "severity": "medium"})
+        elif visibility < 3000:
+            score += 5
+            factors.append({"label": "Reduced visibility", "severity": "low"})
+    else:
+        factors.append({"label": "Visibility data unavailable", "severity": "low"})
 
-    # Temperature
-    if temp <= 0:
-        score += 20
-        factors.append({"label": "Freezing temperatures", "severity": "high"})
-    elif temp <= 5:
+    # 5. Temperature Signal
+    if temp is not None:
+        if temp <= 0:
+            score += 20
+            factors.append({"label": "Freezing temperatures", "severity": "high"})
+        elif temp <= 5:
+            score += 10
+            factors.append({"label": "Near-freezing temperatures", "severity": "medium"})
+        elif temp >= 40:
+            score += 20
+            factors.append({"label": "Extreme heat", "severity": "high"})
+        elif temp >= 35:
+            score += 10
+            factors.append({"label": "High heat", "severity": "medium"})
+    else:
         score += 10
-        factors.append({"label": "Near-freezing temperatures", "severity": "medium"})
-    elif temp >= 40:
-        score += 20
-        factors.append({"label": "Extreme heat", "severity": "high"})
-    elif temp >= 35:
-        score += 10
-        factors.append({"label": "High heat", "severity": "medium"})
+        factors.append({"label": "Temperature data unavailable", "severity": "medium"})
 
-    # Thunderstorm (OWM 2xx codes)
-    if 200 <= weather_id < 300:
+    # 6. Thunderstorm (OWM 2xx condition codes)
+    if weather_id is not None and 200 <= weather_id < 300:
         score += 35
         factors.append({"label": "Thunderstorm active", "severity": "high"})
 
-    # UV
+    # 7. UV Index
     if uvi >= 8:
         score += 10
         factors.append({"label": "Very high UV index", "severity": "medium"})
@@ -847,8 +977,10 @@ def _compute_trek_risk(weather: dict) -> dict:
         score += 5
         factors.append({"label": "High UV index", "severity": "low"})
 
-    score = min(score, 100)
+    # Clamp score to 0..100
+    score = min(max(score, 0), 100)
 
+    # Categories
     if score >= 65:
         label, color = "High Risk", "red"
     elif score >= 35:
@@ -883,39 +1015,14 @@ async def get_trek_weather(lat: float, lon: float):
         )
 
     raw = resp.json()
-
-    weather_data = {
-        "temp":          raw["main"]["temp"],
-        "feels_like":    raw["main"]["feels_like"],
-        "temp_min":      raw["main"]["temp_min"],
-        "temp_max":      raw["main"]["temp_max"],
-        "humidity":      raw["main"]["humidity"],
-        "pressure":      raw["main"]["pressure"],
-        "visibility":    raw.get("visibility", 10000),
-        "wind_speed":    raw["wind"]["speed"],
-        "wind_deg":      raw["wind"].get("deg", 0),
-        "wind_gust":     raw["wind"].get("gust"),
-        "clouds":        raw["clouds"]["all"],
-        "rain_1h":       raw.get("rain", {}).get("1h", 0),
-        "snow_1h":       raw.get("snow", {}).get("1h", 0),
-        "weather_id":    raw["weather"][0]["id"],
-        "weather_main":  raw["weather"][0]["main"],
-        "weather_desc":  raw["weather"][0]["description"],
-        "weather_icon":  raw["weather"][0]["icon"],
-        "sunrise":       raw["sys"]["sunrise"],
-        "sunset":        raw["sys"]["sunset"],
-        "uvi":           0,
-        "location_name": raw.get("name", ""),
-        "country":       raw["sys"].get("country", ""),
-        "dt":            raw["dt"],
-    }
-
+    weather_data = _normalize_owm_response(raw)
     risk = _compute_trek_risk(weather_data)
 
     return {
         "weather": weather_data,
         "risk":    risk,
     }
+
 
 
 # ─── Admin: Trek Import ───
@@ -1066,163 +1173,206 @@ def add_state_column():
 INDIA_LAT_MIN, INDIA_LAT_MAX = 6.5, 37.5
 INDIA_LON_MIN, INDIA_LON_MAX = 68.0, 97.5
 
+def get_query_variants(q: str) -> list[str]:
+    """Generate search variants for Indian trek names (phonetic alternates, pass suffixes)."""
+    import re
+    variants = [q]
+
+    # Strip common noise words: 'trek', 'trail'
+    cleaned = re.sub(r'\b(trek|trail)\b', '', q, flags=re.IGNORECASE).strip()
+    if cleaned and cleaned.lower() != q.lower():
+        variants.append(cleaned)
+
+    # Tibetan/Himalayan pass suffix '...la' (e.g. Goechala -> Goecha La, Rohtangla -> Rohtang La)
+    for v in list(variants):
+        words = v.split()
+        new_words = []
+        changed = False
+        for w in words:
+            if len(w) > 4 and w.lower().endswith('chala'):
+                new_words.append(w[:-2] + ' ' + w[-2:])
+                changed = True
+            elif len(w) > 3 and w.lower().endswith('la') and not w.lower().endswith('ala') and w.lower() not in ('kerala', 'bangla', 'shila', 'mandala'):
+                new_words.append(w[:-2] + ' ' + w[-2:])
+                changed = True
+            else:
+                new_words.append(w)
+        if changed:
+            variants.append(' '.join(new_words))
+
+    # Indian trek phonetic alternates (Hampta <-> Hamta)
+    for v in list(variants):
+        if re.search(r'\bhampta\b', v, re.IGNORECASE):
+            variants.append(re.sub(r'\bhampta\b', 'Hamta', v, flags=re.IGNORECASE))
+        elif re.search(r'\bhamta\b', v, re.IGNORECASE):
+            variants.append(re.sub(r'\bhamta\b', 'Hampta', v, flags=re.IGNORECASE))
+
+    seen = set()
+    result = []
+    for v in variants:
+        k = v.strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            result.append(v.strip())
+    return result
+
+
 @app.get("/search/wikidata")
 async def search_wikidata(
     q: str = Query(..., description="Search query for trek names"),
     limit: int = Query(20, le=50, description="Maximum results")
 ):
     """
-    Search Wikidata for treks/mountains/peaks/forts across all of India.
+    Search Wikidata for treks/mountains/peaks/forts/passes across all of India.
     Uses Wikidata Search API (wbsearchentities) + entity lookup for speed.
     """
-    # Use Wikidata Search API to find matching entities by name
+    cache_key = f"wikidata:{q.strip().lower()}:{limit}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     search_url = "https://www.wikidata.org/w/api.php"
-    search_params = {
-        "action": "wbsearchentities",
-        "search": q,
-        "language": "en",
-        "format": "json",
-        "type": "item",
-        "limit": limit * 2  # Get more to filter by type
+    headers = {"User-Agent": "TrailVerse/1.0 (https://trailverse.app; admin@trailverse.app)"}
+
+    # Valid type QIDs — trek-relevant landforms across all of India
+    valid_types = {
+        "Q8502",    # mountain/peak/hill
+        "Q1785071",  # fort (military construction)
+        "Q23413",    # fort (generic)
+        "Q2977485",  # hill fort
+        "Q57831",    # fortress
+        "Q3969557",  # mountain pass
+        "Q133056",   # mountain pass (primary Wikidata entity)
+        "Q1572689",  # ridge
+        "Q3530445",  # hill
+        "Q39594",    # valley (e.g. Valley of Flowers)
+        "Q46169",    # national park
+        "Q158454",   # biosphere reserve
+        "Q34038",    # waterfall
+        "Q23397",    # lake
+        "Q211302",   # glacial lake
     }
-    headers = {"User-Agent": "TrailVerse/1.0"}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        # First, search for entities matching the query
-        search_resp = await client.get(search_url, params=search_params, headers=headers)
+    variants = get_query_variants(q)
 
-        if search_resp.status_code != 200:
-            # Match the fail-open behavior of the other sources: a Wikidata
-            # outage/timeout returns empty results instead of raising, so
-            # /search/external and direct callers never get a 5xx.
-            print(f"[search/wikidata] q={q!r} HTTP {search_resp.status_code}: {search_resp.text[:120]}")
-            return {"results": [], "source": "wikidata", "count": 0, "error": f"Wikidata HTTP {search_resp.status_code}"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        results = []
+        seen_names = set()
 
-        search_data = search_resp.json()
-        search_results = search_data.get("search", [])
+        for variant in variants:
+            search_params = {
+                "action": "wbsearchentities",
+                "search": variant,
+                "language": "en",
+                "format": "json",
+                "type": "item",
+                "limit": 50,
+            }
 
-        if not search_results:
-            return {"results": [], "source": "wikidata", "count": 0}
+            try:
+                search_resp = await client.get(search_url, params=search_params, headers=headers)
+                if search_resp.status_code != 200:
+                    continue
+                search_data = search_resp.json()
+                search_results = search_data.get("search", [])
+            except Exception:
+                continue
 
-        # Filter to relevant types: mountain/peak (Q8502), fort (Q1785071), mountain pass (Q3969557),
-        # ridge (Q1572689), hill (Q3530445)
-        # We'll fetch details for each entity and filter
-        entity_ids = [r["id"] for r in search_results[:limit * 2]]
-        entity_details = {}
+            if not search_results:
+                continue
 
-        # Batch all entity IDs into as few requests as possible via the
-        # wbgetentities API, which accepts pipe-separated QIDs in a single call.
-        # Chunk to stay within the per-request limit (50) for high limits.
-        entity_chunk_size = 50
-        for i in range(0, len(entity_ids), entity_chunk_size):
-            chunk = entity_ids[i:i + entity_chunk_size]
+            entity_ids = [r["id"] for r in search_results[:50]]
+            entity_details = {}
+
+            # Fetch entity claims in batches of 50
             entity_params = {
                 "action": "wbgetentities",
-                "ids": "|".join(chunk),
+                "ids": "|".join(entity_ids),
                 "props": "claims|labels|descriptions",
                 "format": "json",
             }
             try:
-                entity_resp = await client.get(search_url, params=entity_params, headers=headers, timeout=15)
+                entity_resp = await client.get(search_url, params=entity_params, headers=headers, timeout=12)
                 if entity_resp.status_code == 200:
                     entity_details.update(entity_resp.json().get("entities", {}))
             except Exception:
-                continue
+                pass
 
-        # Valid type QIDs — trek-relevant landforms across all of India
-        # Q8502 = mountain/peak/hill
-        # Q1785071 = fort (military construction)
-        # Q23413 = fort (generic)
-        # Q2977485 = hill fort
-        # Q57831 = fortress (subclass of fort)
-        # Q3969557 = mountain pass
-        # Q1572689 = ridge
-        # Q3530445 = hill
-        # Q39594 = valley  (e.g. Valley of Flowers)
-        # Q46169 = national park  (e.g. Valley of Flowers NP)
-        # Q158454 = biosphere reserve
-        # Q34038 = waterfall  (waterfall treks)
-        # Q23397 = lake  (high-altitude trek lakes)
-        # Q211302 = glacial lake  (e.g. Roopkund)
-        valid_types = {
-            "Q8502", "Q1785071", "Q23413", "Q2977485", "Q57831", "Q3969557",
-            "Q1572689", "Q3530445", "Q39594", "Q46169", "Q158454", "Q34038",
-            "Q23397", "Q211302",
-        }
-        results = []
+            for entity_id, entity in entity_details.items():
+                if not entity:
+                    continue
 
-        for entity_id, entity in entity_details.items():
-            if not entity:
-                continue
+                claims = entity.get("claims", {})
+                p31 = claims.get("P31", [])
+                p279 = claims.get("P279", [])
 
-            # Check if entity has any of the valid types (P31 instance of, P279 subclass of)
-            claims = entity.get("claims", {})
-            p31 = claims.get("P31", [])
-            p279 = claims.get("P279", [])
+                has_valid_type = False
+                for claim in p31 + p279:
+                    mainsnak = claim.get("mainsnak", {})
+                    if mainsnak.get("snaktype") == "value":
+                        val = mainsnak.get("datavalue", {}).get("value", {})
+                        if val.get("id") in valid_types:
+                            has_valid_type = True
+                            break
 
-            has_valid_type = False
-            for claim in p31 + p279:
-                mainsnak = claim.get("mainsnak", {})
-                if mainsnak.get("snaktype") == "value":
-                    val = mainsnak.get("datavalue", {}).get("value", {})
-                    if val.get("id") in valid_types:
-                        has_valid_type = True
+                if not has_valid_type:
+                    continue
+
+                # Get coordinates (P625)
+                coord_claims = claims.get("P625", [])
+                lat = lon = None
+                for coord_claim in coord_claims:
+                    mainsnak = coord_claim.get("mainsnak", {})
+                    if mainsnak.get("snaktype") == "value":
+                        val = mainsnak.get("datavalue", {}).get("value", {})
+                        lat = val.get("latitude")
+                        lon = val.get("longitude")
                         break
 
-            if not has_valid_type:
-                continue
+                if lat is None or lon is None:
+                    continue
 
-            # Get coordinates (P625)
-            coord_claims = claims.get("P625", [])
-            lat = lon = None
-            for coord_claim in coord_claims:
-                mainsnak = coord_claim.get("mainsnak", {})
-                if mainsnak.get("snaktype") == "value":
-                    val = mainsnak.get("datavalue", {}).get("value", {})
-                    lat = val.get("latitude")
-                    lon = val.get("longitude")
+                # Filter by India bbox
+                if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+                    continue
+
+                # Get elevation (P2044)
+                elevation = None
+                elev_claims = claims.get("P2044", [])
+                for elev_claim in elev_claims:
+                    mainsnak = elev_claim.get("mainsnak", {})
+                    if mainsnak.get("snaktype") == "value":
+                        val = mainsnak.get("datavalue", {}).get("value", {})
+                        elevation = int(float(val.get("amount", 0)))
+                        break
+
+                description = entity.get("descriptions", {}).get("en", {}).get("value", "")
+                name = entity.get("labels", {}).get("en", {}).get("value", entity_id)
+
+                norm_key = name.strip().lower()
+                if norm_key in seen_names:
+                    continue
+                seen_names.add(norm_key)
+
+                results.append({
+                    "id": entity_id,
+                    "name": name,
+                    "lat": lat,
+                    "lon": lon,
+                    "elevation_m": elevation,
+                    "description": description,
+                    "source": "wikidata",
+                })
+
+                if len(results) >= limit:
                     break
 
-            if lat is None or lon is None:
-                continue
-
-            # Filter by India bbox (global search = all India)
-            if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
-                continue
-
-            # Get elevation (P2044)
-            elevation = None
-            elev_claims = claims.get("P2044", [])
-            for elev_claim in elev_claims:
-                mainsnak = elev_claim.get("mainsnak", {})
-                if mainsnak.get("snaktype") == "value":
-                    val = mainsnak.get("datavalue", {}).get("value", {})
-                    elevation = int(float(val.get("amount", 0)))
-                    break
-
-            # Get description
-            description = ""
-            descriptions = entity.get("descriptions", {})
-            if "en" in descriptions:
-                description = descriptions["en"].get("value", "")
-
-            # Get label
-            name = entity.get("labels", {}).get("en", {}).get("value", entity_id)
-
-            results.append({
-                "id": entity_id,
-                "name": name,
-                "lat": lat,
-                "lon": lon,
-                "elevation_m": elevation,
-                "description": description,
-                "source": "wikidata",
-            })
-
-            if len(results) >= limit:
+            if results:
                 break
 
-    return {"results": results, "source": "wikidata", "count": len(results)}
+    response_data = {"results": results, "source": "wikidata", "count": len(results)}
+    set_cached_result(cache_key, response_data)
+    return response_data
 
 
 @app.get("/search/osm")
@@ -1233,12 +1383,14 @@ async def search_osm(
     """
     Search OpenStreetMap Overpass API for hiking trails/peaks/forts across all of India.
     """
-    # Overpass QL query - use proper escaping for regex
+    cache_key = f"osm:{q.strip().lower()}:{limit}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     import re
     escaped_q = re.escape(q)
-    # India bounding box (south, west, north, east): lat 6.5-37.5, lon 68.0-97.5
     india_bbox = f"{INDIA_LAT_MIN},{INDIA_LON_MIN},{INDIA_LAT_MAX},{INDIA_LON_MAX}"
-    # Expanded query to include forts, ridges, hiking routes, trails, and peaks
     overpass_query = f"""
     [out:json][timeout:50];
     (
@@ -1255,7 +1407,6 @@ async def search_osm(
     out center {limit};
     """
 
-    # Use multiple Overpass endpoints for resilience
     overpass_endpoints = [
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
@@ -1263,7 +1414,6 @@ async def search_osm(
     ]
 
     async def try_mirror(url: str):
-        """Query a single Overpass mirror; returns (ok: bool, data_or_error)."""
         try:
             async with httpx.AsyncClient(timeout=1.5) as client:
                 resp = await client.post(
@@ -1277,7 +1427,6 @@ async def search_osm(
         except Exception as e:
             return False, f"Overpass error ({url}): {str(e)}"
 
-    # Race all mirrors concurrently (1.5s timeout each); take the first success.
     tasks = [asyncio.ensure_future(try_mirror(u)) for u in overpass_endpoints]
     data = None
     last_error = None
@@ -1287,7 +1436,6 @@ async def search_osm(
             ok, payload = fut.result()
             if ok:
                 data = payload
-                # We have our answer - cancel the losers
                 for t in tasks:
                     t.cancel()
                 break
@@ -1296,18 +1444,25 @@ async def search_osm(
             break
 
     if data is None:
-        # Return empty results instead of raising - OSM is optional
         return {"results": [], "source": "osm", "count": 0, "error": last_error}
+
     results = []
+    seen = set()
     for element in data.get("elements", []):
         lat = element.get("lat") or element.get("center", {}).get("lat")
         lon = element.get("lon") or element.get("center", {}).get("lon")
         tags = element.get("tags", {})
+        name = tags.get("name", "").strip()
 
-        if lat and lon and tags.get("name"):
+        if lat and lon and name:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
             results.append({
                 "id": f"osm_{element.get('type', 'node')}_{element.get('id')}",
-                "name": tags.get("name", ""),
+                "name": name,
                 "lat": lat,
                 "lon": lon,
                 "elevation_m": int(tags.get("ele")) if tags.get("ele") and str(tags["ele"]).isdigit() else None,
@@ -1317,7 +1472,9 @@ async def search_osm(
                 "osm_id": element.get("id"),
             })
 
-    return {"results": results, "source": "osm", "count": len(results)}
+    response_data = {"results": results, "source": "osm", "count": len(results)}
+    set_cached_result(cache_key, response_data)
+    return response_data
 
 
 @app.get("/search/owm")
@@ -1326,12 +1483,13 @@ async def search_owm(
     limit: int = Query(20, le=50, description="Maximum results")
 ):
     """
-    Search OpenWeatherMap Geocoding API (direct endpoint) for places across India.
-    OWM's geocoding database covers villages, towns, districts and some natural
-    features — a useful third source alongside Wikidata and OSM.
-
-    Note: OWM geocoding does NOT return elevation, so elevation_m is None here.
+    Search OpenWeatherMap Geocoding API for places across India.
     """
+    cache_key = f"owm:{q.strip().lower()}:{limit}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     if not OPENWEATHER_API_KEY:
         return {"results": [], "source": "owm", "count": 0, "error": "OPENWEATHER_API_KEY not configured"}
 
@@ -1352,17 +1510,21 @@ async def search_owm(
         return {"results": [], "source": "owm", "count": 0, "error": f"OWM geocoding error: {e}"}
 
     results = []
+    seen = set()
     for place in data:
         lat = place.get("lat")
         lon = place.get("lon")
         name = place.get("name")
         if lat is None or lon is None or not name:
             continue
-        # Keep only results within the India bbox (global search = all India)
         if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
             continue
 
-        # Build a short human-readable description from available fields
+        key = name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
         desc_parts = [p for p in [name, place.get("state"), place.get("country")] if p]
         description = ", ".join(desc_parts)
 
@@ -1371,14 +1533,16 @@ async def search_owm(
             "name": name,
             "lat": lat,
             "lon": lon,
-            "elevation_m": None,  # OWM geocoding does not provide elevation
+            "elevation_m": None,
             "description": description,
             "source": "owm",
         })
         if len(results) >= limit:
             break
 
-    return {"results": results, "source": "owm", "count": len(results)}
+    response_data = {"results": results, "source": "owm", "count": len(results)}
+    set_cached_result(cache_key, response_data)
+    return response_data
 
 
 @app.get("/search/nominatim")
@@ -1388,46 +1552,27 @@ async def search_nominatim(
 ):
     """
     Search OpenStreetMap Nominatim geocoder for trek-relevant places across India.
-
-    Nominatim covers many natural features (valleys, waterfalls, gorges), forts,
-    passes and villages that Wikidata/Overpass may miss. It is distinct from the
-    Overpass API (which searches structured tags rather than place names).
-
-    Results are strictly filtered to trek-relevant OSM classes/types so that
-    nearby businesses (shops, restaurants, offices, gyms) never surface even
-    when their name fuzzy-matches the query.
+    Filters to trek-relevant OSM classes and verifies name relevance.
     """
-    # Trek-relevant OSM classes. Anything outside this set (amenities, shops,
-    # buildings, highways, offices, landuse, railway, boundary, etc.) is dropped.
+    cache_key = f"nominatim:{q.strip().lower()}:{limit}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     KEEP_CLASSES = {
-        "natural",      # peaks, valleys, waterfalls, ridges, hills
-        "peak",         # defensive: Nominatim v1 usually returns class=natural/type=peak
-        "waterway",     # rivers, streams, waterfalls
-        "place",        # locality only — see KEEP_TYPES (unpopulated features)
-        "tourism",      # attractions, viewpoints, camp sites
-        "historic",     # forts, castle ruins, monuments
-        "leisure",      # nature reserves, parks
-        # NOTE: populated settlements (village, hamlet, town, city, suburb) are
-        # NOT trek features and are deliberately excluded via KEEP_TYPES below
-        # (a village that shares a trek's name is no more the trek than a city
-        # is). But OSM place=locality means an UNPOPULATED named place — fort
-        # sites, passes, viewpoints, beaches — which is exactly trek-relevant
-        # (e.g. "Rajmachi Fort" is tagged place/locality).
+        "natural",        # peaks, valleys, waterfalls, ridges, hills, saddles
+        "peak",           # defensive Nominatim class
+        "mountain_pass",  # mountain passes (e.g. Hamta Pass)
+        "waterway",       # rivers, streams, waterfalls
+        "place",          # locality only (unpopulated features)
+        "tourism",        # attractions, viewpoints, camp sites
+        "historic",       # forts, castle ruins, monuments
+        "leisure",        # nature reserves, parks
     }
-    # Within the broad recreation classes, only keep OSM types that are
-    # trek-relevant. This is what kills e.g. "Fitness 4 Ever" (leisure/
-    # fitness_centre), "Ever Green" guest house (tourism/guest_house), an
-    # urban residential "Ever Green Towers Park" (leisure/park) and
-    # "Ever Living Museum" (tourism/museum) while keeping "Sandhan Valley"
-    # (tourism/attraction), "Kedarkantha Base Camp" (tourism/camp_site) and
-    # "Nanda Devi National Park" (leisure/nature_reserve).
-    #
-    # Note: real national parks are tagged leisure/nature_reserve in OSM, so
-    # the generic leisure/park type (urban green spaces) is deliberately
-    # excluded — it is not a trek feature.
+
     KEEP_TYPES = {
         "place": {
-            "locality",  # unpopulated named places: fort sites, passes, viewpoints
+            "locality",
         },
         "tourism": {
             "attraction", "viewpoint", "view_point", "camp_site", "picnic_site",
@@ -1439,76 +1584,96 @@ async def search_nominatim(
     }
 
     geocode_url = "https://nominatim.openstreetmap.org/search"
-    # Ask for more than needed because we filter heavily afterwards.
-    # Nominatim's API allows up to 50 results per request.
-    raw_limit = min(limit * 4, 50)
-    params = {
-        "q": q,
-        "format": "json",
-        "limit": raw_limit,
-        "countrycodes": "in",
-        "addressdetails": 1,
-    }
     headers = {"User-Agent": "TrailVerse/1.0 (contact: trailverse@app)"}
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(geocode_url, params=params, headers=headers)
-        if resp.status_code != 200:
-            return {"results": [], "source": "nominatim", "count": 0, "error": f"Nominatim error: HTTP {resp.status_code}"}
-        data = resp.json()
-    except Exception as e:
-        return {"results": [], "source": "nominatim", "count": 0, "error": f"Nominatim error: {e}"}
-
-    # Query words, lowercased, for the name-relevance filter.
-    query_words = {w.lower() for w in q.replace(",", " ").split() if w}
+    variants = get_query_variants(q)
 
     results = []
-    for place in data:
-        # --- Layer 1: OSM class / type filtering ---
-        place_class = place.get("class")
-        place_type = place.get("type")
-        if place_class not in KEEP_CLASSES:
-            continue
-        if place_class in KEEP_TYPES and place_type not in KEEP_TYPES[place_class]:
-            continue
+    seen = set()
 
-        try:
-            lat = float(place.get("lat"))
-            lon = float(place.get("lon"))
-        except (TypeError, ValueError):
-            continue
-        if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
-            continue
+    async with httpx.AsyncClient(timeout=10) as client:
+        for variant in variants:
+            raw_limit = 50
+            params = {
+                "q": variant,
+                "format": "json",
+                "limit": raw_limit,
+                "countrycodes": "in",
+                "addressdetails": 1,
+            }
 
-        name = place.get("name") or (place.get("display_name", "").split(",")[0] if place.get("display_name") else "")
-        if not name:
-            continue
+            try:
+                resp = await client.get(geocode_url, params=params, headers=headers)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+            except Exception:
+                continue
 
-        # --- Layer 2: name relevance — at least one query word must appear in
-        # the result's name (catches unrelated named places whose fuzzy match
-        # to the query is incidental).
-        name_lower = name.lower()
-        if query_words and not any(w in name_lower for w in query_words):
-            continue
+            # Query words normalized for matching
+            norm_q = q.lower().replace(",", " ").replace("-", " ")
+            query_words = {w for w in norm_q.split() if w}
+            compact_query_words = {w.replace(" ", "") for w in query_words}
 
-        description = place.get("display_name", "") or f"OSM {place.get('type', 'place')}"
+            for place in data:
+                place_class = place.get("class")
+                place_type = place.get("type")
+                if place_class not in KEEP_CLASSES:
+                    continue
+                if place_class in KEEP_TYPES and place_type not in KEEP_TYPES[place_class]:
+                    continue
 
-        results.append({
-            "id": f"nominatim_{place.get('osm_type', 'node')}_{place.get('osm_id')}",
-            "name": name,
-            "lat": lat,
-            "lon": lon,
-            "elevation_m": None,
-            "description": description,
-            "source": "nominatim",
-            "class": place_class,
-            "osm_type": place.get("osm_type", "node"),
-        })
-        if len(results) >= limit:
-            break
+                try:
+                    lat = float(place.get("lat"))
+                    lon = float(place.get("lon"))
+                except (TypeError, ValueError):
+                    continue
 
-    return {"results": results, "source": "nominatim", "count": len(results)}
+                if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+                    continue
+
+                name = place.get("name") or (place.get("display_name", "").split(",")[0] if place.get("display_name") else "")
+                if not name:
+                    continue
+
+                name_lower = name.lower()
+                compact_name = name_lower.replace(" ", "").replace("-", "")
+
+                # Relevance check: query word match or compact match
+                has_match = (
+                    any(w in name_lower for w in query_words) or
+                    any(cw in compact_name for cw in compact_query_words) or
+                    any(name_lower in v.lower() for v in variants)
+                )
+                if query_words and not has_match:
+                    continue
+
+                key = name.strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                description = place.get("display_name", "") or f"OSM {place.get('type', 'place')}"
+
+                results.append({
+                    "id": f"nominatim_{place.get('osm_type', 'node')}_{place.get('osm_id')}",
+                    "name": name,
+                    "lat": lat,
+                    "lon": lon,
+                    "elevation_m": None,
+                    "description": description,
+                    "source": "nominatim",
+                    "class": place_class,
+                    "osm_type": place.get("osm_type", "node"),
+                })
+                if len(results) >= limit:
+                    break
+
+            if results:
+                break
+
+    response_data = {"results": results, "source": "nominatim", "count": len(results)}
+    set_cached_result(cache_key, response_data)
+    return response_data
 
 
 @app.get("/search/external")
@@ -1519,77 +1684,55 @@ async def search_external(
 ):
     """
     Combined external search across Wikidata, OSM, Nominatim, and OWM.
-
-    All sources run concurrently. A failing source returns empty results and
-    never blocks the others; if every source fails the endpoint still returns
-    200 with an empty list.
+    All sources run concurrently with caching and name deduplication.
     """
+    cache_key = f"external:{q.strip().lower()}:{limit}:{sources}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
     all_results = []
 
     async def run_source(source: str):
-        """Run a single external source, returning (results, error) without raising."""
         source = source.strip().lower()
         if source not in ("wikidata", "osm", "owm", "nominatim"):
-            print(f"[search/external] q={q!r} skipping unknown source: {source!r}")
             return [], f"unknown source: {source}"
         if source == "wikidata":
             try:
                 wk_resp = await search_wikidata(q=q, limit=limit)
-                print(f"[search/external] q={q!r} wikidata: {len(wk_resp['results'])} results")
                 return wk_resp["results"], None
-            except HTTPException as e:
-                print(f"[search/external] q={q!r} wikidata FAILED: HTTP {e.status_code}: {e.detail}")
-                return [], f"wikidata HTTP {e.status_code}"
             except Exception as e:
-                print(f"[search/external] q={q!r} wikidata ERROR: {type(e).__name__}: {e}")
                 return [], str(e)
         elif source == "owm":
             try:
                 owm_resp = await search_owm(q=q, limit=limit)
-                owm_results = owm_resp["results"]
-                owm_err = owm_resp.get("error")
-                print(f"[search/external] q={q!r} owm: {len(owm_results)} results" + (f" | owm error: {owm_err}" if owm_err else ""))
-                return owm_results, owm_err
+                return owm_resp["results"], owm_resp.get("error")
             except Exception as e:
-                print(f"[search/external] q={q!r} owm ERROR: {type(e).__name__}: {e}")
                 return [], str(e)
         elif source == "nominatim":
             try:
                 nom_resp = await search_nominatim(q=q, limit=limit)
-                nom_results = nom_resp["results"]
-                nom_err = nom_resp.get("error")
-                print(f"[search/external] q={q!r} nominatim: {len(nom_results)} results" + (f" | nominatim error: {nom_err}" if nom_err else ""))
-                return nom_results, nom_err
+                return nom_resp["results"], nom_resp.get("error")
             except Exception as e:
-                print(f"[search/external] q={q!r} nominatim ERROR: {type(e).__name__}: {e}")
                 return [], str(e)
         # default: osm
         try:
             osm_resp = await search_osm(q=q, limit=limit)
-            osm_results = osm_resp["results"]
-            osm_err = osm_resp.get("error")
-            print(f"[search/external] q={q!r} osm: {len(osm_results)} results" + (f" | osm error: {osm_err}" if osm_err else ""))
-            return osm_results, osm_err
+            return osm_resp["results"], osm_resp.get("error")
         except Exception as e:
-            print(f"[search/external] q={q!r} osm ERROR: {type(e).__name__}: {e}")
             return [], str(e)
 
-    # Run all requested sources concurrently
     outcomes = await asyncio.gather(
         *[run_source(s) for s in source_list],
         return_exceptions=True,
     )
     for outcome in outcomes:
         if isinstance(outcome, Exception):
-            print(f"[search/external] q={q!r} source raised unexpectedly: {type(outcome).__name__}: {outcome}")
             continue
         results, _err = outcome
         all_results.extend(results)
 
-    # Deduplicate by normalized name (case-insensitive, trimmed) — keeps the
-    # first occurrence so e.g. Nominatim + Wikidata don't return the same place
-    # twice under slightly different casing/whitespace.
     seen = set()
     unique_results = []
     for r in all_results:
@@ -1598,5 +1741,7 @@ async def search_external(
             seen.add(key)
             unique_results.append(r)
 
-    print(f"[search/external] q={q!r} final: {len(unique_results)} unique results (sources: {','.join(source_list)})")
-    return {"results": unique_results[:limit], "count": len(unique_results), "sources": source_list}
+    response_data = {"results": unique_results[:limit], "count": len(unique_results), "sources": source_list}
+    set_cached_result(cache_key, response_data)
+    return response_data
+
