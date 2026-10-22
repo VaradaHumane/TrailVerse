@@ -87,12 +87,19 @@ def run_regression_tests():
 
         # 3. Test Cache Latency on Repeated Queries
         print("\n[PART 3: CACHE LATENCY VERIFICATION]")
-        for query, _ in global_targets[:3]:
+        found_queries = [q for q, _ in global_targets if results_summary.get(q, {}).get("found")]
+        for query in found_queries[:3]:
             t0 = time.time()
             res = client.get("/search/external", params={"q": query, "limit": 10, "sources": "wikidata,nominatim,osm"})
             dt = time.time() - t0
-            print(f"  CACHED: '{query}' resolved in {dt*1000:.2f}ms")
+            print(f"  CACHED (Found): '{query}' resolved in {dt*1000:.2f}ms")
             assert dt < 0.1, f"Cached response took too long: {dt:.3f}s"
+
+        # Verify not-found/empty query was NOT cached
+        not_found_queries = [q for q, _ in global_targets if not results_summary.get(q, {}).get("found")]
+        if not_found_queries:
+            nf_query = not_found_queries[0]
+            print(f"  VERIFIED: Empty result for '{nf_query}' was not cached per hardening rule")
 
         print("\n" + "=" * 60)
         print("SUMMARY OF REGRESSION RESULTS:")

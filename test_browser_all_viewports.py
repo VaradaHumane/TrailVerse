@@ -1,21 +1,93 @@
 #!/usr/bin/env python3
 """
-Comprehensive Playwright Browser Verification Script
+Comprehensive Playwright Browser Verification Script (with Strict Browser Health Checking)
 Tests TrailVerse across Desktop (1280x800) and Mobile (390x844) viewports:
 - /explore (Search, Weather, Risk Scoring, OSM Map, Local vs Global)
 - /groups (Group cards, filters, creation link)
 - /login & /signup (Auth forms, validation, mobile responsiveness)
 - Navbar (Desktop navigation and mobile hamburger drawer)
+
+Enforces zero console errors, zero unhandled page errors, and zero failed essential network requests.
 """
 import asyncio
 import os
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 BASE_URL = "http://localhost:3000"
 SCREENSHOT_DIR = "/Users/varada/.gemini/antigravity-ide/brain/9b39a494-aa7d-4567-87b6-a37da0bac267/screenshots"
 
+# ─── Explicitly Ignored Third-Party Noise ───
+IGNORED_CONSOLE_PATTERNS = [
+    "GL Driver Message",       # WebGL GPU driver ReadPixels buffer stall warning
+    "WebGL",                   # General WebGL context warnings
+    "scroll-behavior: smooth", # Next.js HTML smooth scrolling suggestion
+    "favicon.ico",             # Browser favicon fetch
+]
+
+IGNORED_FAILED_HOSTS = [
+    "tile.openstreetmap.org",
+    "a.tile.openstreetmap.org",
+    "b.tile.openstreetmap.org",
+    "c.tile.openstreetmap.org",
+    "openstreetmap.org",        # OSM export embed iframe tiles
+    "upload.wikimedia.org",     # External image thumbnails
+]
+
+
+def attach_health_monitors(page, page_name: str, health_state: dict):
+    """Attach listeners to capture errors and failed network requests."""
+    def on_page_error(err):
+        err_msg = f"[{page_name} PAGE ERROR] {err}"
+        print(f"❌ {err_msg}")
+        health_state["page_errors"].append(err_msg)
+
+    def on_console(msg):
+        if msg.type == "error":
+            text = msg.text
+            # Filter known third-party warnings
+            if any(pattern in text for pattern in IGNORED_CONSOLE_PATTERNS):
+                return
+            console_msg = f"[{page_name} CONSOLE ERROR] {text}"
+            print(f"⚠️ {console_msg}")
+            health_state["console_errors"].append(console_msg)
+
+    def on_request_failed(request):
+        # Ignore intentional client-side cancellations from AbortController
+        if request.failure == "net::ERR_ABORTED":
+            return
+        url = request.url
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        # Filter known third-party tile / external asset hosts
+        if any(ignored in host for ignored in IGNORED_FAILED_HOSTS):
+            return
+        # Filter favicon
+        if "favicon.ico" in url:
+            return
+        fail_msg = f"[{page_name} FAILED REQUEST] {request.method} {url} ({request.failure})"
+        print(f"❌ {fail_msg}")
+        health_state["failed_requests"].append(fail_msg)
+
+    page.on("pageerror", on_page_error)
+    page.on("console", on_console)
+    page.on("requestfailed", on_request_failed)
+
+
 async def run_browser_verification():
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    health_state = {
+        "page_errors": [],
+        "console_errors": [],
+        "failed_requests": [],
+    }
+
+    print("\n=======================================================")
+    print("🛡️  BROWSER HEALTH CHECK CONFIGURATION")
+    print("=======================================================")
+    print(f"Ignored console patterns : {IGNORED_CONSOLE_PATTERNS}")
+    print(f"Ignored failed hosts     : {IGNORED_FAILED_HOSTS}")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -29,6 +101,7 @@ async def run_browser_verification():
         print("🖥️  DESKTOP VIEWPORT VERIFICATION (1280x800)")
         print("=======================================================")
         desktop_page = await browser.new_page(viewport={"width": 1280, "height": 800})
+        attach_health_monitors(desktop_page, "DESKTOP", health_state)
         
         # Test 1.1: Home page
         print("📍 Visiting / (Desktop)...")
@@ -101,6 +174,7 @@ async def run_browser_verification():
             viewport={"width": 390, "height": 844},
             user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
         )
+        attach_health_monitors(mobile_page, "MOBILE", health_state)
 
         # Test 2.1: Home page & Mobile Navigation
         print("📍 Visiting / (Mobile)...")
@@ -164,9 +238,28 @@ async def run_browser_verification():
         await mobile_page.close()
         await browser.close()
 
+        # -------------------------------------------------------------
+        # 3. BROWSER HEALTH SUMMARY & ASSERTIONS
+        # -------------------------------------------------------------
         print("\n=======================================================")
-        print("🎉 ALL DESKTOP & MOBILE BROWSER TESTS PASSED 100%!")
+        print("🏥  BROWSER HEALTH REPORT")
         print("=======================================================")
+        print(f"Unhandled Page Errors  : {len(health_state['page_errors'])}")
+        print(f"Console Errors         : {len(health_state['console_errors'])}")
+        print(f"Failed Essential Req's : {len(health_state['failed_requests'])}")
+
+        assert len(health_state["page_errors"]) == 0, (
+            f"Failing due to {len(health_state['page_errors'])} unhandled page errors: {health_state['page_errors']}"
+        )
+        assert len(health_state["console_errors"]) == 0, (
+            f"Failing due to {len(health_state['console_errors'])} console errors: {health_state['console_errors']}"
+        )
+        assert len(health_state["failed_requests"]) == 0, (
+            f"Failing due to {len(health_state['failed_requests'])} failed essential requests: {health_state['failed_requests']}"
+        )
+
+        print("\n🎉 ALL DESKTOP & MOBILE BROWSER TESTS AND HEALTH CHECKS PASSED 100%!")
+        print("=======================================================\n")
 
 if __name__ == "__main__":
     asyncio.run(run_browser_verification())
