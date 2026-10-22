@@ -8,7 +8,6 @@ BASE_URL = "http://localhost:3000"
 async def test_global_search():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            executable_path="/Users/varada/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell",
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )

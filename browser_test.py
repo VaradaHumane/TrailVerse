@@ -118,17 +118,16 @@ async def test_explore_page():
         print(f"   Found {count} global results (Wikidata + OSM)")
 
         if count > 0:
-            # Click first global result (likely Wikidata)
             await results.first.click()
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(1500)
 
             trek_header = page.locator('h2').filter(has_text="Kalsubai")
-            await trek_header.wait_for(state="visible", timeout=5000)
+            await trek_header.wait_for(state="visible", timeout=15000)
             print("   ✅ Global trek details card rendered")
 
             # Verify weather loads for global result
             weather_section = page.locator('text="Current Weather"')
-            await weather_section.wait_for(state="visible", timeout=5000)
+            await weather_section.wait_for(state="visible", timeout=15000)
             print("   ✅ Weather loaded for global result")
 
             # Verify risk loads
@@ -137,7 +136,7 @@ async def test_explore_page():
 
             # Verify map loads
             iframe = page.locator('iframe[src*="openstreetmap.org"]')
-            await iframe.wait_for(state="attached", timeout=5000)
+            await iframe.wait_for(state="attached", timeout=15000)
             print("   ✅ OSM map iframe present for global result")
         else:
             print("   ⚠️ No global results found (may be expected for some queries)")
