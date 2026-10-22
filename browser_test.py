@@ -55,7 +55,14 @@ async def test_explore_page():
         # Verify weather section loads
         weather_section = page.locator('text="Current Weather"')
         await weather_section.wait_for(state="visible", timeout=10000)
-        temp_text = await page.locator('.text-4xl.font-bold.text-white').first.text_content()
+        # Scope to the weather card: the temp div shares text-4xl font-bold
+        # text-white with the h1 heading, so filter out h1 tags via :not().
+        temp_locator = page.locator('.text-4xl.font-bold.text-white:not(h1)').first
+        await temp_locator.wait_for(state="visible", timeout=10000)
+        temp_text = await temp_locator.text_content()
+        assert temp_text and any(c.isdigit() for c in temp_text), (
+            f"Weather temp not numeric: {temp_text!r}"
+        )
         print(f"   ✅ Weather loaded: {temp_text}")
 
         # Verify risk assessment
@@ -104,7 +111,7 @@ async def test_explore_page():
         await page.wait_for_timeout(800)  # longer debounce for external API
 
         print("   Waiting for dropdown...")
-        await dropdown.wait_for(state="visible", timeout=90000)
+        await dropdown.wait_for(state="visible", timeout=30000)
         print("   Dropdown visible!")
         results = dropdown.locator('button[role="option"]')
         count = await results.count()
@@ -168,6 +175,63 @@ async def test_explore_page():
 
         await page.locator('button:has-text("Show Local Only")').wait_for(state="visible", timeout=2000)
         print("   ✅ Global search mode activated again")
+
+        # === TEST 6: Empty state for trek not in local DB (with CTA) ===
+        print("\n🔍 TEST 6: Empty state + CTA for 'sandhan valley'")
+        # Toggle back to local — the CTA only shows in local mode
+        local_btn = page.locator('button:has-text("Show Local Only")')
+        if await local_btn.count() > 0:
+            await local_btn.click()
+            await page.wait_for_timeout(300)
+            await page.locator('button:has-text("Search Global Databases")').wait_for(
+                state="visible", timeout=3000
+            )
+
+        await search_input.fill("")
+        await page.wait_for_timeout(300)
+        await search_input.fill("sandhan valley")
+        await page.wait_for_timeout(800)
+
+        # "No treks found in Maharashtra." empty-state text
+        empty_state = page.get_by_text("No treks found", exact=False)
+        await empty_state.wait_for(state="visible", timeout=10000)
+        print("   ✅ Empty state shown")
+
+        # CTA button: second "Search global databases" (the toggle is first)
+        all_cta = page.locator('button:has-text("Search Global Databases")')
+        assert await all_cta.count() >= 2, "Expected toggle + CTA button"
+        cta_text = await all_cta.last.text_content()
+        assert "Search global databases" in cta_text, f"Unexpected CTA text: {cta_text}"
+        print(f"   ✅ CTA button present: {cta_text.strip()}")
+
+        # Dropdown must NOT be visible (no local results for sandhan valley)
+        assert not await page.locator('#trek-explorer-results').is_visible(), (
+            "Dropdown should not appear for non-DB trek"
+        )
+        print("   ✅ No dropdown (correct for non-DB trek)")
+
+        # === TEST 7: Weather temp is numeric, not heading text ===
+        print("\n🌡️ TEST 7: Weather temp is actual temperature")
+        await search_input.fill("")
+        await page.wait_for_timeout(200)
+        await search_input.fill("kalsubai")
+        await page.wait_for_timeout(800)
+
+        await dropdown.wait_for(state="visible", timeout=10000)
+        await dropdown.locator('button[role="option"]').first.click()
+
+        # Wait for the temp element (filtering out the h1 heading via :not())
+        temp_locator = page.locator('.text-4xl.font-bold.text-white:not(h1)').first
+        await temp_locator.wait_for(state="visible", timeout=10000)
+        temp_text = await temp_locator.text_content()
+        assert temp_text is not None, "No weather temp element found"
+        assert "Explore Any Trek" not in temp_text, (
+            f"Selector matched h1 heading instead of weather temp: {temp_text!r}"
+        )
+        assert any(c.isdigit() for c in temp_text), (
+            f"Weather temp not numeric: {temp_text!r}"
+        )
+        print(f"   ✅ Weather temp correct: {temp_text}")
 
         await browser.close()
         print("\n🎉 ALL TESTS PASSED!")

@@ -1,12 +1,33 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import asyncio
 import os
 import httpx
+import time
+from hashlib import md5
 
 load_dotenv()
+
+# Simple in-memory cache for external search endpoints
+_search_cache = {}  # key: cache_key, value: (data, timestamp)
+CACHE_TTL = 3600  # 1 hour in seconds
+
+def get_cached_result(key: str):
+    """Get cached result if not expired. Returns None if miss or expired."""
+    if key in _search_cache:
+        data, timestamp = _search_cache[key]
+        if time.time() - timestamp < CACHE_TTL:
+            return data
+        else:
+            del _search_cache[key]
+    return None
+
+def set_cached_result(key: str, data: dict):
+    """Cache a successful result."""
+    _search_cache[key] = (data, time.time())
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -432,23 +453,35 @@ def update_group(group_id: str, body: UpdateGroupRequest):
 
 @app.get("/groups")
 def list_groups():
+    from collections import Counter
+
     groups_result = supabase.table("trek_groups") \
         .select("*, users(name, username)") \
         .order("created_at", desc=True) \
         .execute()
 
-    groups = []
-    for group in groups_result.data:
-        member_count_result = supabase.table("trek_group_members") \
-            .select("id", count="exact") \
-            .eq("group_id", group["id"]) \
+    # Fetch all member counts in ONE query (fixes N+1 problem)
+    group_ids = [g["id"] for g in groups_result.data]
+
+    if group_ids:
+        # Get all members for all groups at once
+        members_result = supabase.table("trek_group_members") \
+            .select("group_id") \
+            .in_("group_id", group_ids) \
             .execute()
 
+        # Count members per group using Counter
+        member_counts = Counter(m["group_id"] for m in members_result.data)
+    else:
+        member_counts = Counter()
+
+    groups = []
+    for group in groups_result.data:
         host_info = group.pop("users", None)
         groups.append({
             **group,
             "host": host_info,
-            "member_count": member_count_result.count or 0,
+            "member_count": member_counts.get(group["id"], 0),
         })
 
     return {"groups": groups}
@@ -613,6 +646,8 @@ def post_message(group_id: str, body: PostAnnouncementRequest):
 
 @app.get("/groups/{group_id}/queries")
 def get_queries(group_id: str, viewer_username: str):
+    from collections import defaultdict
+
     group = get_group_or_404(group_id)
     viewer = get_user_by_username(viewer_username)
     is_host = viewer["id"] == group["host_id"]
@@ -626,15 +661,28 @@ def get_queries(group_id: str, viewer_username: str):
 
     queries_result = query.order("created_at", desc=False).execute()
 
-    queries = []
-    for q in queries_result.data:
+    # Fix N+1 query: fetch all replies in ONE query instead of per-query loop
+    if queries_result.data:
+        query_ids = [q["id"] for q in queries_result.data]
+
+        # Fetch ALL replies for all queries at once
         replies_result = supabase.table("trek_group_query_replies") \
             .select("*, users(name, username)") \
-            .eq("query_id", q["id"]) \
+            .in_("query_id", query_ids) \
             .order("created_at", desc=False) \
             .execute()
 
-        queries.append({**q, "replies": replies_result.data})
+        # Group replies by query_id using defaultdict
+        replies_by_query = defaultdict(list)
+        for reply in replies_result.data:
+            replies_by_query[reply["query_id"]].append(reply)
+
+        # Attach replies to each query
+        queries = []
+        for q in queries_result.data:
+            queries.append({**q, "replies": replies_by_query.get(q["id"], [])})
+    else:
+        queries = []
 
     return {"queries": queries, "is_host": is_host}
 
@@ -1217,7 +1265,7 @@ async def search_osm(
     async def try_mirror(url: str):
         """Query a single Overpass mirror; returns (ok: bool, data_or_error)."""
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
+            async with httpx.AsyncClient(timeout=1.5) as client:
                 resp = await client.post(
                     url,
                     data={"data": overpass_query},
@@ -1229,7 +1277,7 @@ async def search_osm(
         except Exception as e:
             return False, f"Overpass error ({url}): {str(e)}"
 
-    # Race all mirrors concurrently (3s timeout each); take the first success.
+    # Race all mirrors concurrently (1.5s timeout each); take the first success.
     tasks = [asyncio.ensure_future(try_mirror(u)) for u in overpass_endpoints]
     data = None
     last_error = None
