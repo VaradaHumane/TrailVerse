@@ -7,27 +7,115 @@ import asyncio
 import os
 import httpx
 import time
+import logging
 from hashlib import md5
 
-load_dotenv()
+# Load environment variables (supports running from repo root or trailverse-api)
+_dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_dotenv_path):
+    load_dotenv(dotenv_path=_dotenv_path)
+else:
+    load_dotenv()
 
-# Simple in-memory cache for external search endpoints
-_search_cache = {}  # key: cache_key, value: (data, timestamp)
-CACHE_TTL = 3600  # 1 hour in seconds
+# ─── Wikimedia / OSM User-Agent Configuration ───
+WIKIMEDIA_CONTACT = os.getenv("WIKIMEDIA_CONTACT")
+if not WIKIMEDIA_CONTACT:
+    logging.warning(
+        "WARNING: WIKIMEDIA_CONTACT environment variable is unset. "
+        "Per Wikimedia API User-Agent policy (https://meta.wikimedia.org/wiki/User-Agent_policy), "
+        "requests without contact information may be throttled or blocked with HTTP 403. "
+        "Please set WIKIMEDIA_CONTACT in your environment or .env (e.g. admin@trailverse.app or https://trailverse.app)."
+    )
+
+def get_wikimedia_user_agent() -> str:
+    """Return compliant Wikimedia User-Agent with contact info if configured."""
+    if WIKIMEDIA_CONTACT:
+        return f"TrailVerse/1.0 ({WIKIMEDIA_CONTACT})"
+    return "TrailVerse/1.0"
+
+# ─── In-Memory Cache with TTL and Eviction ───
+DEFAULT_SEARCH_TTL = 3600  # 1 hour default for external search results
+WEATHER_CACHE_TTL = 600    # 10 minutes max for weather and risk assessments
+CACHE_MAX_SIZE = 500       # Max items in memory before eviction
+
+class TTLCache:
+    """
+    In-memory cache with per-item TTL, max size limit, and eviction.
+    - Weather/risk data TTL <= 600 seconds (10 minutes).
+    - Search results TTL default = 3600 seconds (1 hour).
+    - Eviction: Purges expired entries first; if still full, evicts the oldest entry.
+    - Never caches failed or empty-due-to-error results.
+    """
+    def __init__(self, max_size: int = CACHE_MAX_SIZE, default_ttl: int = DEFAULT_SEARCH_TTL):
+        self.max_size = max_size
+        self.default_ttl = default_ttl
+        self._store: dict[str, tuple[any, float, float]] = {}  # key -> (data, expires_at, created_at)
+
+    def get(self, key: str):
+        now = time.time()
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        data, expires_at, _ = entry
+        if now >= expires_at:
+            del self._store[key]
+            return None
+        return data
+
+    def set(self, key: str, data: any, ttl: int | None = None) -> bool:
+        """
+        Store item in cache with specified or default TTL.
+        Returns True if cached, False if rejected (e.g. error/failed payload).
+        """
+        # Guard: Never cache None or failed results
+        if data is None:
+            return False
+
+        if isinstance(data, dict):
+            # Check for error flags or messages
+            if data.get("error") is not None or data.get("failed") is True:
+                return False
+            if "detail" in data and isinstance(data["detail"], str) and "error" in data["detail"].lower():
+                return False
+            if data.get("empty_due_to_error") is True:
+                return False
+
+        effective_ttl = ttl if ttl is not None else self.default_ttl
+        now = time.time()
+        expires_at = now + effective_ttl
+
+        # Eviction logic if at capacity
+        if len(self._store) >= self.max_size and key not in self._store:
+            # 1. Purge expired items
+            expired_keys = [k for k, (_, exp, _) in self._store.items() if now >= exp]
+            for k in expired_keys:
+                del self._store[k]
+
+            # 2. If still at max capacity, evict oldest entry
+            if len(self._store) >= self.max_size:
+                oldest_key = min(self._store.keys(), key=lambda k: self._store[k][2])
+                del self._store[oldest_key]
+
+        self._store[key] = (data, expires_at, now)
+        return True
+
+    def clear(self):
+        self._store.clear()
+
+    def __len__(self):
+        return len(self._store)
+
+    def __contains__(self, key):
+        return self.get(key) is not None
+
+_cache = TTLCache()
+_search_cache = _cache._store
 
 def get_cached_result(key: str):
-    """Get cached result if not expired. Returns None if miss or expired."""
-    if key in _search_cache:
-        data, timestamp = _search_cache[key]
-        if time.time() - timestamp < CACHE_TTL:
-            return data
-        else:
-            del _search_cache[key]
-    return None
+    return _cache.get(key)
 
-def set_cached_result(key: str, data: dict):
-    """Cache a successful result."""
-    _search_cache[key] = (data, time.time())
+def set_cached_result(key: str, data: dict, ttl: int | None = None) -> bool:
+    return _cache.set(key, data, ttl=ttl)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -167,7 +255,10 @@ def list_treks(
 @app.get("/treks/{trek_id}/coordinates")
 def get_trek_coordinates(trek_id: str):
     """Get coordinates for a specific trek (if available)"""
-    result = supabase.table("treks").select("id, name, lat, lon").eq("id", trek_id).execute()
+    try:
+        result = supabase.table("treks").select("id, name, lat, lon").eq("id", trek_id).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Trek not found")
     if not result.data:
         raise HTTPException(status_code=404, detail="Trek not found")
     return result.data[0]
@@ -386,10 +477,13 @@ def get_user_by_username(username: str):
 
 
 def get_group_or_404(group_id: str):
-    result = supabase.table("trek_groups") \
-        .select("*") \
-        .eq("id", group_id) \
-        .execute()
+    try:
+        result = supabase.table("trek_groups") \
+            .select("*") \
+            .eq("id", group_id) \
+            .execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Group not found")
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -720,10 +814,13 @@ def post_reply(group_id: str, query_id: str, body: PostReplyRequest):
     group = get_group_or_404(group_id)
     user = get_user_by_username(body.username)
 
-    query_result = supabase.table("trek_group_queries") \
-        .select("*") \
-        .eq("id", query_id) \
-        .execute()
+    try:
+        query_result = supabase.table("trek_group_queries") \
+            .select("*") \
+            .eq("id", query_id) \
+            .execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Query not found")
 
     if not query_result.data:
         raise HTTPException(status_code=404, detail="Query not found")
@@ -996,7 +1093,13 @@ async def get_trek_weather(lat: float, lon: float):
     """
     Fetch current weather for a trek location and return enriched data
     with a heuristic risk prediction score.
+    Weather and risk data are cached for up to 10 minutes (600s).
     """
+    cache_key = f"weather:{round(lat, 4)}:{round(lon, 4)}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     if not OPENWEATHER_API_KEY:
         raise HTTPException(status_code=500, detail="OpenWeatherMap API key not configured")
 
@@ -1018,10 +1121,13 @@ async def get_trek_weather(lat: float, lon: float):
     weather_data = _normalize_owm_response(raw)
     risk = _compute_trek_risk(weather_data)
 
-    return {
+    response_data = {
         "weather": weather_data,
         "risk":    risk,
     }
+    # Weather and risk data must not be cached longer than 10 minutes (600s)
+    set_cached_result(cache_key, response_data, ttl=WEATHER_CACHE_TTL)
+    return response_data
 
 
 
@@ -1232,7 +1338,7 @@ async def search_wikidata(
         return cached
 
     search_url = "https://www.wikidata.org/w/api.php"
-    headers = {"User-Agent": "TrailVerse/1.0 (https://trailverse.app; admin@trailverse.app)"}
+    headers = {"User-Agent": get_wikimedia_user_agent()}
 
     # Valid type QIDs — trek-relevant landforms across all of India
     valid_types = {
@@ -1254,6 +1360,7 @@ async def search_wikidata(
     }
 
     variants = get_query_variants(q)
+    error_occurred = False
 
     async with httpx.AsyncClient(timeout=15) as client:
         results = []
@@ -1272,10 +1379,12 @@ async def search_wikidata(
             try:
                 search_resp = await client.get(search_url, params=search_params, headers=headers)
                 if search_resp.status_code != 200:
+                    error_occurred = True
                     continue
                 search_data = search_resp.json()
                 search_results = search_data.get("search", [])
             except Exception:
+                error_occurred = True
                 continue
 
             if not search_results:
@@ -1295,8 +1404,10 @@ async def search_wikidata(
                 entity_resp = await client.get(search_url, params=entity_params, headers=headers, timeout=12)
                 if entity_resp.status_code == 200:
                     entity_details.update(entity_resp.json().get("entities", {}))
+                else:
+                    error_occurred = True
             except Exception:
-                pass
+                error_occurred = True
 
             for entity_id, entity in entity_details.items():
                 if not entity:
@@ -1371,7 +1482,9 @@ async def search_wikidata(
                 break
 
     response_data = {"results": results, "source": "wikidata", "count": len(results)}
-    set_cached_result(cache_key, response_data)
+    # Never cache empty results if an error occurred during fetching
+    if not (error_occurred and len(results) == 0):
+        set_cached_result(cache_key, response_data, ttl=DEFAULT_SEARCH_TTL)
     return response_data
 
 
@@ -1584,11 +1697,12 @@ async def search_nominatim(
     }
 
     geocode_url = "https://nominatim.openstreetmap.org/search"
-    headers = {"User-Agent": "TrailVerse/1.0 (contact: trailverse@app)"}
+    headers = {"User-Agent": get_wikimedia_user_agent()}
     variants = get_query_variants(q)
 
     results = []
     seen = set()
+    error_occurred = False
 
     async with httpx.AsyncClient(timeout=10) as client:
         for variant in variants:
@@ -1604,9 +1718,11 @@ async def search_nominatim(
             try:
                 resp = await client.get(geocode_url, params=params, headers=headers)
                 if resp.status_code != 200:
+                    error_occurred = True
                     continue
                 data = resp.json()
             except Exception:
+                error_occurred = True
                 continue
 
             # Query words normalized for matching
@@ -1672,7 +1788,9 @@ async def search_nominatim(
                 break
 
     response_data = {"results": results, "source": "nominatim", "count": len(results)}
-    set_cached_result(cache_key, response_data)
+    # Never cache empty results if an error occurred during fetching
+    if not (error_occurred and len(results) == 0):
+        set_cached_result(cache_key, response_data, ttl=DEFAULT_SEARCH_TTL)
     return response_data
 
 
@@ -1727,10 +1845,14 @@ async def search_external(
         *[run_source(s) for s in source_list],
         return_exceptions=True,
     )
+    has_errors = False
     for outcome in outcomes:
         if isinstance(outcome, Exception):
+            has_errors = True
             continue
-        results, _err = outcome
+        results, err = outcome
+        if err is not None:
+            has_errors = True
         all_results.extend(results)
 
     seen = set()
@@ -1742,6 +1864,8 @@ async def search_external(
             unique_results.append(r)
 
     response_data = {"results": unique_results[:limit], "count": len(unique_results), "sources": source_list}
-    set_cached_result(cache_key, response_data)
+    # Never cache empty results if errors occurred across sources
+    if not (has_errors and len(unique_results) == 0):
+        set_cached_result(cache_key, response_data, ttl=DEFAULT_SEARCH_TTL)
     return response_data
 
