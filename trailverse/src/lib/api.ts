@@ -355,3 +355,104 @@ export async function updateGroup(groupId: string, data: {
   }
   return res.json()
 }
+
+// ── Group Expenses & Permit Splitter ──
+
+export type GroupExpense = {
+  id: string
+  group_id: string
+  title: string
+  category: "permit" | "transport" | "food" | "guide" | "gear" | "stay" | "other"
+  amount: number
+  paid_by: string
+  split_members: string[]
+  notes: string
+  created_at: string
+}
+
+export type GroupExpenseSummary = {
+  total_amount: number
+  permit_amount: number
+  category_totals: Record<string, number>
+  balances: Record<string, number>
+  debts: { from_user: string; to_user: string; amount: number }[]
+}
+
+export type GroupExpensesResponse = {
+  expenses: GroupExpense[]
+  upi: { upi_id: string; upi_name: string } | null
+  settlements: { id: string; from_user: string; to_user: string; amount: number; created_at: string }[]
+  summary: GroupExpenseSummary
+  members: string[]
+}
+
+export async function getGroupExpenses(groupId: string): Promise<GroupExpensesResponse> {
+  const res = await fetch(`${API_BASE}/groups/${groupId}/expenses`)
+  if (!res.ok) throw new Error("Failed to load group expenses")
+  return res.json()
+}
+
+export async function createGroupExpense(groupId: string, data: {
+  title: string
+  category: string
+  amount: number
+  paid_by: string
+  split_members: string[]
+  notes?: string
+}) {
+  const res = await fetch(`${API_BASE}/groups/${groupId}/expenses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || "Failed to add expense")
+  }
+  return res.json()
+}
+
+export async function deleteGroupExpense(groupId: string, expenseId: string, requester: string) {
+  const res = await fetch(`${API_BASE}/groups/${groupId}/expenses/${expenseId}?requester=${encodeURIComponent(requester)}`, {
+    method: "DELETE",
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || "Failed to delete expense")
+  }
+  return res.json()
+}
+
+export async function setGroupUpi(groupId: string, data: {
+  host_username: string
+  upi_id: string
+  upi_name: string
+}) {
+  const res = await fetch(`${API_BASE}/groups/${groupId}/upi`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || "Failed to save UPI details")
+  }
+  return res.json()
+}
+
+export async function settleExpense(groupId: string, data: {
+  from_user: string
+  to_user: string
+  amount: number
+}) {
+  const res = await fetch(`${API_BASE}/groups/${groupId}/settle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || "Failed to record payment settlement")
+  }
+  return res.json()
+}

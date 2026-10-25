@@ -1,64 +1,65 @@
 "use client"
 
+import Link from "next/link"
 import {
-  Brain,        // AI recommendation icon
-  Trophy,       // Trail Score icon
-  Users,        // Community icon
-  Camera,       // Content creator icon
-  Shield,       // Risk predictor icon
-  Map,          // Route intelligence icon
+  Wallet,
+  Brain,
+  Trophy,
+  Users,
+  Shield,
+  Search,
 } from "lucide-react"
 
-// This is our data — an array of objects, one per feature card
-// Keeping data separate from UI is good practice (interviewers love this)
 const features = [
+  {
+    icon: Wallet,
+    title: "Group Expense & Permit Splitter",
+    description:
+      "Split cab fares, campsite rentals, and track forest permits. Features automated debt minimization and 1-click UPI payments (GPay, PhonePe, Paytm).",
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10 border-emerald-400/20",
+    badge: "NEW",
+  },
+  {
+    icon: Search,
+    title: "Dynamic Global Search Engine",
+    description:
+      "Instant, live search across 27+ curated trails, mountain regions, difficulty tiers, and fellow community trekkers with real-time results.",
+    color: "text-amber-400",
+    bg: "bg-amber-400/10 border-amber-400/20",
+    badge: "FAST",
+  },
   {
     icon: Brain,
     title: "AI Trek Recommendations",
     description:
-      "Our Random Forest + XGBoost model analyzes your fitness, experience, location and weather to suggest the perfect trek for you.",
+      "Random Forest + XGBoost models analyze your fitness, experience, elevation profile, and weather to suggest the perfect trail for you.",
     color: "text-purple-400",
     bg: "bg-purple-400/10 border-purple-400/20",
   },
   {
     icon: Trophy,
-    title: "Trail Score & Rankings",
+    title: "Trail Score & City Rankings",
     description:
-      "Earn points for every trek. Climb city, state and national leaderboards. Your score updates the moment you log a trek.",
-    color: "text-emerald-400",
-    bg: "bg-emerald-400/10 border-emerald-400/20",
+      "Earn verified points for every logged summit. Climb city and regional leaderboards as your trail score updates instantaneously.",
+    color: "text-yellow-400",
+    bg: "bg-yellow-400/10 border-yellow-400/20",
   },
   {
     icon: Shield,
-    title: "Trek Risk Predictor",
+    title: "Trek Risk & Weather Predictor",
     description:
-      "AI-powered safety ratings using live weather data, rainfall, wind speed and trail difficulty. Know before you go.",
+      "AI-powered safety ratings analyzing real-time mountain weather, rainfall, wind speeds, and trail difficulty before you step out.",
     color: "text-red-400",
     bg: "bg-red-400/10 border-red-400/20",
   },
   {
     icon: Users,
-    title: "Trek Groups & Events",
+    title: "Trek Groups, RSVPs & Forums",
     description:
-      "Create or join trekking groups. Leaders post events, share GPX routes, and manage RSVPs — all in one place.",
+      "Create or join expeditions. Hosts post announcements, manage RSVPs, answer route questions, and plan itineraries collaboratively.",
     color: "text-blue-400",
     bg: "bg-blue-400/10 border-blue-400/20",
-  },
-  {
-    icon: Camera,
-    title: "Content Creator Mode",
-    description:
-      "Upload reels and photos. AI writes captions and hashtags for you. Predict your reel's reach before you post.",
-    color: "text-pink-400",
-    bg: "bg-pink-400/10 border-pink-400/20",
-  },
-  {
-    icon: Map,
-    title: "Route Intelligence",
-    description:
-      "Upload a GPX file and instantly get distance, elevation gain, estimated calories burned and average pace.",
-    color: "text-amber-400",
-    bg: "bg-amber-400/10 border-amber-400/20",
   },
 ]
 
@@ -103,9 +104,16 @@ export default function FeaturesSection() {
                 className="group border border-white/10 rounded-2xl p-6 bg-white/5 hover:bg-white/10 hover:border-white/20 transition-all duration-300 cursor-pointer"
                 // group → lets child elements react to hover on the parent
               >
-                {/* Icon container */}
-                <div className={`w-12 h-12 rounded-xl border flex items-center justify-center mb-4 ${feature.bg}`}>
-                  <Icon className={`w-6 h-6 ${feature.color}`} />
+                {/* Icon container & badge */}
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`w-12 h-12 rounded-xl border flex items-center justify-center ${feature.bg}`}>
+                    <Icon className={`w-6 h-6 ${feature.color}`} />
+                  </div>
+                  {feature.badge && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400">
+                      {feature.badge}
+                    </span>
+                  )}
                 </div>
 
                 {/* Card title */}
@@ -121,6 +129,17 @@ export default function FeaturesSection() {
             )
           })}
 
+        </div>
+
+        {/* View all features link */}
+        <div className="text-center mt-12">
+          <Link
+            href="/features"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 hover:border-emerald-500/40 text-white text-sm font-semibold transition-all hover:scale-105"
+          >
+            <span>Explore All Platform Features & Roadmap</span>
+            <span className="text-emerald-400">→</span>
+          </Link>
         </div>
       </div>
     </section>

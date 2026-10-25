@@ -13,6 +13,7 @@ import {
   getQueries, postQuery, postReply, leaveGroup,
 } from "@/lib/api"
 import Navbar from "@/components/Navbar"
+import GroupExpenseSplitter from "@/components/GroupExpenseSplitter"
 
 function subscribe(callback: () => void) {
   window.addEventListener("storage", callback)
@@ -84,6 +85,7 @@ export default function GroupDetailPage() {
   const [isHost, setIsHost] = useState(false)
   const [isMember, setIsMember] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState<"expenses" | "announcements" | "queries">("expenses")
 
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState("")
@@ -406,46 +408,102 @@ export default function GroupDetailPage() {
           )}
         </div>
 
-        {/* ANNOUNCEMENTS */}
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
-          <h2 className="text-white font-semibold mb-4">Announcements</h2>
+        {/* ACTIVITY TABS */}
+        <div className="flex items-center gap-2 border-b border-white/10 pb-3 overflow-x-auto scrollbar-none">
+          <button
+            type="button"
+            onClick={() => setActiveTab("expenses")}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+              activeTab === "expenses"
+                ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/20"
+                : "bg-white/5 hover:bg-white/10 text-white/60 hover:text-white"
+            }`}
+          >
+            <span>💰</span>
+            <span>Expenses & Splitter</span>
+          </button>
 
-          {isHost && (
-            <form onSubmit={handlePostMessage} className="flex gap-3 mb-5">
-              <input
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                placeholder="Post an update for the group..."
-                className="flex-1 bg-black/40 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder:text-white/20 focus:outline-none focus:border-emerald-500/50 text-sm"
-              />
-              <button
-                type="submit"
-                disabled={postingMessage}
-                className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
-          )}
+          <button
+            type="button"
+            onClick={() => setActiveTab("announcements")}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+              activeTab === "announcements"
+                ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/20"
+                : "bg-white/5 hover:bg-white/10 text-white/60 hover:text-white"
+            }`}
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>Announcements ({messages.length})</span>
+          </button>
 
-          {messages.length === 0 ? (
-            <p className="text-white/30 text-sm">No announcements yet</p>
-          ) : (
-            <div className="space-y-3">
-              {messages.map((msg) => (
-                <div key={msg.id} className="bg-black/40 border border-white/10 rounded-xl p-4">
-                  <p className="text-white/80 text-sm">{msg.message}</p>
-                  <p className="text-white/30 text-xs mt-2">
-                    {msg.users?.name} · {new Date(msg.created_at).toLocaleString()}
-                  </p>
-                </div>
-              ))}
-            </div>
+          {(isMember || isHost) && (
+            <button
+              type="button"
+              onClick={() => setActiveTab("queries")}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                activeTab === "queries"
+                  ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/20"
+                  : "bg-white/5 hover:bg-white/10 text-white/60 hover:text-white"
+              }`}
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              <span>Q&A ({queries.length})</span>
+            </button>
           )}
         </div>
 
-        {/* QUERIES */}
-        {(isMember || isHost) && (
+        {/* TAB 1: EXPENSE & PERMIT SPLITTER */}
+        {activeTab === "expenses" && (
+          <GroupExpenseSplitter
+            groupId={groupId}
+            currentUsername={username}
+            isHost={isHost}
+            members={members}
+          />
+        )}
+
+        {/* TAB 2: ANNOUNCEMENTS */}
+        {activeTab === "announcements" && (
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
+            <h2 className="text-white font-semibold mb-4">Announcements</h2>
+
+            {isHost && (
+              <form onSubmit={handlePostMessage} className="flex gap-3 mb-5">
+                <input
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  placeholder="Post an update for the group..."
+                  className="flex-1 bg-black/40 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder:text-white/20 focus:outline-none focus:border-emerald-500/50 text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={postingMessage}
+                  className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg transition-colors text-sm flex items-center gap-2"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            )}
+
+            {messages.length === 0 ? (
+              <p className="text-white/30 text-sm">No announcements yet</p>
+            ) : (
+              <div className="space-y-3">
+                {messages.map((msg) => (
+                  <div key={msg.id} className="bg-black/40 border border-white/10 rounded-xl p-4">
+                    <p className="text-white/80 text-sm">{msg.message}</p>
+                    <p className="text-white/30 text-xs mt-2">
+                      {msg.users?.name} · {new Date(msg.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: QUERIES */}
+        {activeTab === "queries" && (isMember || isHost) && (
           <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
             <div className="flex items-center gap-2 mb-4">
               <MessageCircle className="w-4 h-4 text-blue-400" />

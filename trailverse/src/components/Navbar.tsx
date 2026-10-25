@@ -52,7 +52,7 @@ export default function Navbar() {
           <Link href="/groups" className="text-sm text-white/70 hover:text-white transition-colors">
             Groups
           </Link>
-          <Link href="/#features" className="text-sm text-white/70 hover:text-white transition-colors">
+          <Link href="/features" className="text-sm text-white/70 hover:text-white transition-colors">
             Features
           </Link>
 
@@ -119,7 +119,7 @@ export default function Navbar() {
             Groups
           </Link>
           <Link
-            href="/#features"
+            href="/features"
             onClick={() => setMobileMenuOpen(false)}
             className="block text-sm text-white/80 hover:text-white py-1"
           >

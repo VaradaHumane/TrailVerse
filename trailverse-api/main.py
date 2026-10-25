@@ -955,6 +955,299 @@ def get_user_groups(username: str):
 
 
 # ============================================================
+# GROUP TREK EXPENSE & PERMIT SPLITTER
+# ============================================================
+
+import sqlite3
+import uuid
+import json
+
+EXPENSES_DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+
+def init_expenses_db():
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS group_expenses (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'other',
+        amount REAL NOT NULL,
+        paid_by TEXT NOT NULL,
+        split_members TEXT NOT NULL DEFAULT 'all',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS group_upi (
+        group_id TEXT PRIMARY KEY,
+        upi_id TEXT NOT NULL,
+        upi_name TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS expense_settlements (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        from_user TEXT NOT NULL,
+        to_user TEXT NOT NULL,
+        amount REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+init_expenses_db()
+
+class CreateExpenseRequest(BaseModel):
+    title: str
+    category: str = "other"  # permit, transport, food, guide, gear, stay, other
+    amount: float
+    paid_by: str
+    split_members: List[str] = ["all"]
+    notes: Optional[str] = ""
+
+class SetUpiRequest(BaseModel):
+    host_username: str
+    upi_id: str
+    upi_name: str
+
+class SettleExpenseRequest(BaseModel):
+    from_user: str
+    to_user: str
+    amount: float
+
+def compute_group_debts(group_id: str, expenses: list, settlements: list, all_members: list):
+    balances = {m: 0.0 for m in all_members}
+    total_expenses = 0.0
+    total_permits = 0.0
+    category_totals = {}
+
+    for exp in expenses:
+        amt = float(exp["amount"])
+        total_expenses += amt
+        cat = exp["category"].lower()
+        category_totals[cat] = round(category_totals.get(cat, 0.0) + amt, 2)
+        if cat == "permit":
+            total_permits += amt
+
+        payer = exp["paid_by"]
+        if payer not in balances:
+            balances[payer] = 0.0
+        balances[payer] += amt
+
+        split_members = exp.get("split_members") or ["all"]
+        if "all" in split_members or not split_members:
+            targets = all_members if all_members else [payer]
+        else:
+            targets = [m for m in split_members if m in all_members] or [payer]
+
+        share = amt / len(targets)
+        for t in targets:
+            if t not in balances:
+                balances[t] = 0.0
+            balances[t] -= share
+
+    for s in settlements:
+        f = s["from_user"]
+        t = s["to_user"]
+        amt = float(s["amount"])
+        if f in balances:
+            balances[f] += amt
+        if t in balances:
+            balances[t] -= amt
+
+    for m in balances:
+        balances[m] = round(balances[m], 2)
+
+    debtors = []
+    creditors = []
+    for m, bal in balances.items():
+        if bal < -0.01:
+            debtors.append({"user": m, "amount": -bal})
+        elif bal > 0.01:
+            creditors.append({"user": m, "amount": bal})
+
+    debts = []
+    d_idx = 0
+    c_idx = 0
+    while d_idx < len(debtors) and c_idx < len(creditors):
+        deb = debtors[d_idx]
+        cred = creditors[c_idx]
+        settle_amt = min(deb["amount"], cred["amount"])
+        if settle_amt > 0.01:
+            debts.append({
+                "from_user": deb["user"],
+                "to_user": cred["user"],
+                "amount": round(settle_amt, 2),
+            })
+        deb["amount"] -= settle_amt
+        cred["amount"] -= settle_amt
+        if deb["amount"] <= 0.01:
+            d_idx += 1
+        if cred["amount"] <= 0.01:
+            c_idx += 1
+
+    return {
+        "total_amount": round(total_expenses, 2),
+        "permit_amount": round(total_permits, 2),
+        "category_totals": category_totals,
+        "balances": balances,
+        "debts": debts,
+    }
+
+def _get_group_member_usernames(group_id: str) -> list[str]:
+    group = get_group_or_404(group_id)
+    host_res = supabase.table("users").select("username").eq("id", group["host_id"]).execute()
+    host_username = host_res.data[0]["username"] if host_res.data else ""
+    members_res = supabase.table("trek_group_members").select("users(username)").eq("group_id", group_id).execute()
+    members = [host_username] if host_username else []
+    for row in members_res.data:
+        u = row.get("users", {}).get("username")
+        if u and u not in members:
+            members.append(u)
+    return members
+
+@app.get("/groups/{group_id}/expenses")
+def get_group_expenses(group_id: str):
+    get_group_or_404(group_id)
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    c.execute("SELECT * FROM group_expenses WHERE group_id = ? ORDER BY created_at DESC", (group_id,))
+    rows = c.fetchall()
+    expenses = []
+    for r in rows:
+        expenses.append({
+            "id": r["id"],
+            "group_id": r["group_id"],
+            "title": r["title"],
+            "category": r["category"],
+            "amount": r["amount"],
+            "paid_by": r["paid_by"],
+            "split_members": json.loads(r["split_members"]) if r["split_members"].startswith("[") else ["all"],
+            "notes": r["notes"],
+            "created_at": r["created_at"],
+        })
+
+    c.execute("SELECT * FROM group_upi WHERE group_id = ?", (group_id,))
+    upi_row = c.fetchone()
+    upi_info = {"upi_id": upi_row["upi_id"], "upi_name": upi_row["upi_name"]} if upi_row else None
+
+    c.execute("SELECT * FROM expense_settlements WHERE group_id = ? ORDER BY created_at DESC", (group_id,))
+    settlements = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    members = _get_group_member_usernames(group_id)
+    calc = compute_group_debts(group_id, expenses, settlements, members)
+
+    return {
+        "expenses": expenses,
+        "upi": upi_info,
+        "settlements": settlements,
+        "summary": calc,
+        "members": members,
+    }
+
+@app.post("/groups/{group_id}/expenses")
+def create_group_expense(group_id: str, body: CreateExpenseRequest):
+    get_group_or_404(group_id)
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Expense amount must be greater than 0")
+
+    expense_id = str(uuid.uuid4())
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO group_expenses (id, group_id, title, category, amount, paid_by, split_members, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        expense_id,
+        group_id,
+        body.title.strip(),
+        body.category.lower().strip(),
+        body.amount,
+        body.paid_by.lower().strip(),
+        json.dumps(body.split_members),
+        body.notes or "",
+    ))
+    conn.commit()
+    conn.close()
+
+    return {"message": "Expense added successfully", "expense_id": expense_id}
+
+@app.delete("/groups/{group_id}/expenses/{expense_id}")
+def delete_group_expense(group_id: str, expense_id: str, requester: str = Query(...)):
+    group = get_group_or_404(group_id)
+    host_res = supabase.table("users").select("username").eq("id", group["host_id"]).execute()
+    host_username = host_res.data[0]["username"] if host_res.data else ""
+
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM group_expenses WHERE id = ? AND group_id = ?", (expense_id, group_id))
+    expense = c.fetchone()
+    if not expense:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Expense not found")
+
+    is_payer = expense["paid_by"].lower() == requester.lower()
+    is_host = host_username.lower() == requester.lower()
+    if not (is_payer or is_host):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only the expense payer or group host can delete this expense")
+
+    c.execute("DELETE FROM group_expenses WHERE id = ?", (expense_id,))
+    conn.commit()
+    conn.close()
+
+    return {"message": "Expense deleted successfully"}
+
+@app.post("/groups/{group_id}/upi")
+def set_group_upi(group_id: str, body: SetUpiRequest):
+    group = get_group_or_404(group_id)
+    host = get_user_by_username(body.host_username)
+    if host["id"] != group["host_id"]:
+        raise HTTPException(status_code=403, detail="Only the host can configure group UPI payment details")
+
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO group_upi (group_id, upi_id, upi_name, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(group_id) DO UPDATE SET upi_id = excluded.upi_id, upi_name = excluded.upi_name, updated_at = CURRENT_TIMESTAMP
+    """, (group_id, body.upi_id.strip(), body.upi_name.strip()))
+    conn.commit()
+    conn.close()
+
+    return {"message": "UPI payment details saved successfully"}
+
+@app.post("/groups/{group_id}/settle")
+def settle_expense(group_id: str, body: SettleExpenseRequest):
+    get_group_or_404(group_id)
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Settlement amount must be greater than 0")
+
+    settlement_id = str(uuid.uuid4())
+    conn = sqlite3.connect(EXPENSES_DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO expense_settlements (id, group_id, from_user, to_user, amount, status)
+    VALUES (?, ?, ?, ?, ?, 'confirmed')
+    """, (settlement_id, group_id, body.from_user.lower().strip(), body.to_user.lower().strip(), body.amount))
+    conn.commit()
+    conn.close()
+
+    return {"message": "Settlement payment recorded successfully"}
+
+
+# ============================================================
 # WEATHER + TREK RISK
 # ============================================================
 
