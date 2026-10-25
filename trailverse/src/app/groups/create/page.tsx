@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Mountain, Plus, Trash2 } from "lucide-react"
 import { createGroup, ItineraryDay } from "@/lib/api"
+import Navbar from "@/components/Navbar"
 
 export default function CreateGroupPage() {
   const router = useRouter()
@@ -79,18 +80,7 @@ export default function CreateGroupPage() {
 
   return (
     <div className="min-h-screen bg-black text-white">
-
-      <nav className="w-full border-b border-white/10 bg-black/80 backdrop-blur-md fixed top-0 z-50">
-        <div className="max-w-3xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 text-white font-bold text-xl">
-            <Mountain className="w-6 h-6 text-emerald-400" />
-            TrailVerse
-          </Link>
-          <Link href="/groups" className="text-sm text-white/60 hover:text-white transition-colors">
-            Back to Groups
-          </Link>
-        </div>
-      </nav>
+      <Navbar />
 
       <main className="max-w-3xl mx-auto px-6 pt-24 pb-16">
         <h1 className="text-2xl font-bold text-white mb-1">Host a Trek Group</h1>

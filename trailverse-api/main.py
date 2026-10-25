@@ -18,20 +18,12 @@ else:
     load_dotenv()
 
 # ─── Wikimedia / OSM User-Agent Configuration ───
-WIKIMEDIA_CONTACT = os.getenv("WIKIMEDIA_CONTACT")
-if not WIKIMEDIA_CONTACT:
-    logging.warning(
-        "WARNING: WIKIMEDIA_CONTACT environment variable is unset. "
-        "Per Wikimedia API User-Agent policy (https://meta.wikimedia.org/wiki/User-Agent_policy), "
-        "requests without contact information may be throttled or blocked with HTTP 403. "
-        "Please set WIKIMEDIA_CONTACT in your environment or .env (e.g. admin@trailverse.app or https://trailverse.app)."
-    )
+WIKIMEDIA_CONTACT = os.getenv("WIKIMEDIA_CONTACT") or "https://trailverse.app; admin@trailverse.app"
 
 def get_wikimedia_user_agent() -> str:
-    """Return compliant Wikimedia User-Agent with contact info if configured."""
-    if WIKIMEDIA_CONTACT:
-        return f"TrailVerse/1.0 ({WIKIMEDIA_CONTACT})"
-    return "TrailVerse/1.0"
+    """Return compliant Wikimedia User-Agent with contact info."""
+    return f"TrailVerse/1.0 ({WIKIMEDIA_CONTACT})"
+
 
 # ─── In-Memory Cache with TTL and Eviction ───
 DEFAULT_SEARCH_TTL = 3600  # 1 hour default for external search results
@@ -421,6 +413,104 @@ def login(body: LoginRequest):
         "name":     user["name"],
         "city":     user["city"],
     }
+
+
+class OAuthSyncRequest(BaseModel):
+    email: str
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    auth_id: Optional[str] = None
+    city: Optional[str] = "Mumbai"
+
+@app.post("/auth/oauth-sync")
+def oauth_sync(body: OAuthSyncRequest):
+    import re
+    # 1. Check if user already exists with this email
+    existing = supabase.table("users") \
+        .select("*") \
+        .eq("email", body.email) \
+        .execute()
+
+    if existing.data and len(existing.data) > 0:
+        user = existing.data[0]
+        if body.avatar_url and not user.get("photo"):
+            supabase.table("users").update({"photo": body.avatar_url}).eq("id", user["id"]).execute()
+        return {
+            "message": "User authenticated",
+            "username": user["username"],
+            "name": user["name"],
+            "city": user.get("city") or "Mumbai",
+            "email": user["email"],
+            "photo": user.get("photo") or body.avatar_url,
+        }
+
+    # 2. Generate clean unique username from email
+    base_user = body.email.split("@")[0].lower()
+    clean_username = re.sub(r"[^a-z0-9_]", "", base_user)
+    if not clean_username:
+        clean_username = "trekker"
+
+    username_candidate = clean_username
+    counter = 1
+    while True:
+        check = supabase.table("users").select("id").ilike("username", username_candidate).execute()
+        if not check.data or len(check.data) == 0:
+            break
+        username_candidate = f"{clean_username}{counter}"
+        counter += 1
+
+    display_name = body.name or base_user.title()
+    new_user_data = {
+        "name": display_name,
+        "email": body.email,
+        "username": username_candidate,
+        "city": body.city or "Mumbai",
+        "photo": body.avatar_url,
+        "trail_score": 0,
+        "rank": "Beginner",
+    }
+    if body.auth_id:
+        new_user_data["id"] = body.auth_id
+
+    try:
+        res = supabase.table("users").insert(new_user_data).execute()
+        created_user = res.data[0] if res.data else new_user_data
+    except Exception as e:
+        # Fallback if id collision with another auth system
+        if "id" in new_user_data:
+            del new_user_data["id"]
+        res = supabase.table("users").insert(new_user_data).execute()
+        created_user = res.data[0] if res.data else new_user_data
+
+    return {
+        "message": "User synced successfully",
+        "username": username_candidate,
+        "name": display_name,
+        "city": body.city or "Mumbai",
+        "email": body.email,
+        "photo": body.avatar_url,
+    }
+
+
+@app.get("/stats")
+def get_stats():
+    """Return live dynamic stats of the platform: registered trekkers, trails mapped, active groups."""
+    try:
+        users_res = supabase.table("users").select("id").execute()
+        trails_res = supabase.table("treks").select("id").execute()
+        groups_res = supabase.table("trek_groups").select("id").execute()
+        return {
+            "total_trekkers": len(users_res.data) if users_res.data else 0,
+            "total_trails": len(trails_res.data) if trails_res.data else 0,
+            "total_groups": len(groups_res.data) if groups_res.data else 0,
+        }
+    except Exception:
+        return {
+            "total_trekkers": 0,
+            "total_trails": 27,
+            "total_groups": 0,
+        }
+
 
 
 # ============================================================
@@ -1340,23 +1430,30 @@ async def search_wikidata(
     search_url = "https://www.wikidata.org/w/api.php"
     headers = {"User-Agent": get_wikimedia_user_agent()}
 
-    # Valid type QIDs — trek-relevant landforms across all of India
+    # Valid type QIDs — trek-relevant landforms across the world (peaks, trails, passes, forts, etc.)
     valid_types = {
         "Q8502",    # mountain/peak/hill
-        "Q1785071",  # fort (military construction)
-        "Q23413",    # fort (generic)
-        "Q2977485",  # hill fort
-        "Q57831",    # fortress
-        "Q3969557",  # mountain pass
-        "Q133056",   # mountain pass (primary Wikidata entity)
-        "Q1572689",  # ridge
-        "Q3530445",  # hill
-        "Q39594",    # valley (e.g. Valley of Flowers)
-        "Q46169",    # national park
+        "Q22338",   # mountain peak
+        "Q2491206", # hiking trail
+        "Q2238215", # mountain range
+        "Q308669",  # summit
+        "Q194552",  # volcano
+        "Q8072",    # volcano
+        "Q169358",  # stratovolcano
+        "Q1785071", # fort (military construction)
+        "Q23413",   # fort (generic)
+        "Q2977485", # hill fort
+        "Q57831",   # fortress
+        "Q3969557", # mountain pass
+        "Q133056",  # mountain pass (primary Wikidata entity)
+        "Q1572689", # ridge
+        "Q3530445", # hill
+        "Q39594",   # valley (e.g. Valley of Flowers)
+        "Q46169",   # national park
         "Q158454",   # biosphere reserve
-        "Q34038",    # waterfall
-        "Q23397",    # lake
-        "Q211302",   # glacial lake
+        "Q34038",   # waterfall
+        "Q23397",   # lake
+        "Q211302",  # glacial lake
     }
 
     variants = get_query_variants(q)
@@ -1440,11 +1537,7 @@ async def search_wikidata(
                         lon = val.get("longitude")
                         break
 
-                if lat is None or lon is None:
-                    continue
-
-                # Filter by India bbox
-                if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+                if lat is None or lon is None or not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
                     continue
 
                 # Get elevation (P2044)
@@ -1465,6 +1558,7 @@ async def search_wikidata(
                     continue
                 seen_names.add(norm_key)
 
+                in_india = (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX)
                 results.append({
                     "id": entity_id,
                     "name": name,
@@ -1473,6 +1567,7 @@ async def search_wikidata(
                     "elevation_m": elevation,
                     "description": description,
                     "source": "wikidata",
+                    "in_india": in_india,
                 })
 
                 if len(results) >= limit:
@@ -1523,16 +1618,16 @@ async def search_osm(
     overpass_endpoints = [
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.ru/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     ]
 
     async def try_mirror(url: str):
         try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
+            async with httpx.AsyncClient(timeout=4.0) as client:
                 resp = await client.post(
                     url,
                     data={"data": overpass_query},
-                    headers={"Accept": "application/json", "User-Agent": "TrailVerse/1.0"}
+                    headers={"Accept": "application/json", "User-Agent": get_wikimedia_user_agent()}
                 )
             if resp.status_code == 200:
                 return True, resp.json()
@@ -1573,6 +1668,7 @@ async def search_osm(
                 continue
             seen.add(key)
 
+            in_india = (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX)
             results.append({
                 "id": f"osm_{element.get('type', 'node')}_{element.get('id')}",
                 "name": name,
@@ -1583,6 +1679,7 @@ async def search_osm(
                 "source": "osm",
                 "osm_type": element.get("type"),
                 "osm_id": element.get("id"),
+                "in_india": in_india,
             })
 
     response_data = {"results": results, "source": "osm", "count": len(results)}
@@ -1608,7 +1705,7 @@ async def search_owm(
 
     geocode_url = "https://api.openweathermap.org/geo/1.0/direct"
     params = {
-        "q": f"{q},IN",
+        "q": q,
         "limit": limit,
         "appid": OPENWEATHER_API_KEY,
     }
@@ -1630,7 +1727,7 @@ async def search_owm(
         name = place.get("name")
         if lat is None or lon is None or not name:
             continue
-        if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             continue
 
         key = name.strip().lower()
@@ -1640,6 +1737,7 @@ async def search_owm(
 
         desc_parts = [p for p in [name, place.get("state"), place.get("country")] if p]
         description = ", ".join(desc_parts)
+        in_india = (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX)
 
         results.append({
             "id": f"owm_{lat}_{lon}",
@@ -1649,6 +1747,7 @@ async def search_owm(
             "elevation_m": None,
             "description": description,
             "source": "owm",
+            "in_india": in_india,
         })
         if len(results) >= limit:
             break
@@ -1711,7 +1810,6 @@ async def search_nominatim(
                 "q": variant,
                 "format": "json",
                 "limit": raw_limit,
-                "countrycodes": "in",
                 "addressdetails": 1,
             }
 
@@ -1744,7 +1842,7 @@ async def search_nominatim(
                 except (TypeError, ValueError):
                     continue
 
-                if not (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX):
+                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
                     continue
 
                 name = place.get("name") or (place.get("display_name", "").split(",")[0] if place.get("display_name") else "")
@@ -1769,6 +1867,7 @@ async def search_nominatim(
                 seen.add(key)
 
                 description = place.get("display_name", "") or f"OSM {place.get('type', 'place')}"
+                in_india = (INDIA_LAT_MIN <= lat <= INDIA_LAT_MAX and INDIA_LON_MIN <= lon <= INDIA_LON_MAX)
 
                 results.append({
                     "id": f"nominatim_{place.get('osm_type', 'node')}_{place.get('osm_id')}",
@@ -1780,6 +1879,7 @@ async def search_nominatim(
                     "source": "nominatim",
                     "class": place_class,
                     "osm_type": place.get("osm_type", "node"),
+                    "in_india": in_india,
                 })
                 if len(results) >= limit:
                     break
@@ -1809,7 +1909,8 @@ async def search_external(
     if cached is not None:
         return cached
 
-    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
+    sources_str = sources.default if hasattr(sources, "default") else str(sources)
+    source_list = [s.strip().lower() for s in sources_str.split(",") if s.strip()]
     all_results = []
 
     async def run_source(source: str):

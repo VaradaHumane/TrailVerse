@@ -98,36 +98,41 @@ export default function TrekExplorer() {
       setLoading(true)
       try {
         if (showGlobalResults) {
-          // Local always wins: check curated DB first. If a curated trek
-          // matches the query, display curated local match.
-          const localData = await getTreks({ q: query, limit: 10, signal })
-          if (cancelled) return
-          if (localData.length > 0) {
-            setResults(localData)
-          } else {
-            // Global search across India external databases
-            let merged: ExternalTrekResult[] = []
-            const mergeAndRender = (sourceResults: ExternalTrekResult[]) => {
-              if (cancelled) return
-              merged = [...merged, ...sourceResults]
-              setResults(dedupeByName(merged))
-            }
-            const calls = [
-              searchExternal(query, { limit: 10, sources: "wikidata", signal }).then(r => mergeAndRender(r.results)),
-              searchExternal(query, { limit: 10, sources: "nominatim", signal }).then(r => mergeAndRender(r.results)),
-              searchExternal(query, { limit: 10, sources: "osm", signal }).then(r => mergeAndRender(r.results)),
-            ]
-            // End loading spinner as soon as first source settles
-            Promise.race(calls.map(c => c.catch(() => {}))).then(() => {
-              if (!cancelled) setLoading(false)
-            })
-            const settled = await Promise.allSettled(calls)
-            settled.forEach((outcome) => {
-              if (outcome.status === "rejected" && !controller.signal.aborted) {
-                console.error("External search source failed:", outcome.reason)
+          // Global Search mode: ALWAYS query external global databases (Wikidata, Nominatim, OSM)
+          let merged: SearchResult[] = []
+          const mergeAndRender = (sourceResults: SearchResult[]) => {
+            if (cancelled) return
+            merged = dedupeByName([...merged, ...sourceResults])
+            setResults(merged)
+          }
+
+          // Concurrently query live external global sources
+          const calls = [
+            searchExternal(query, { limit: 10, sources: "wikidata", signal }).then(r => mergeAndRender(r.results)),
+            searchExternal(query, { limit: 10, sources: "nominatim", signal }).then(r => mergeAndRender(r.results)),
+            searchExternal(query, { limit: 10, sources: "osm", signal }).then(r => mergeAndRender(r.results)),
+          ]
+
+          // Also check local curated DB in parallel so curated treks appear alongside global results
+          getTreks({ q: query, limit: 5, signal })
+            .then((local) => {
+              if (!cancelled && local && local.length > 0) {
+                mergeAndRender(local)
               }
             })
-          }
+            .catch(() => {})
+
+          // End loading spinner as soon as first source settles
+          Promise.race(calls.map(c => c.catch(() => {}))).then(() => {
+            if (!cancelled) setLoading(false)
+          })
+
+          const settled = await Promise.allSettled(calls)
+          settled.forEach((outcome) => {
+            if (outcome.status === "rejected" && !controller.signal.aborted) {
+              console.error("External search source failed:", outcome.reason)
+            }
+          })
         } else {
           // Search local DB with state filter (enforce Maharashtra)
           const stateParam = stateFilter || "Maharashtra"
@@ -421,7 +426,18 @@ export default function TrekExplorer() {
                     role="option"
                     aria-selected={index === selectedIndex}
                   >
-                    <div className="font-medium">{trek.name}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-white">{trek.name}</span>
+                      {isExternal ? (
+                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
+                          {trek.source}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-white/10 text-white/60 border border-white/10 shrink-0">
+                          curated
+                        </span>
+                      )}
+                    </div>
                     <div className="text-white/40 text-sm mt-0.5">{details}</div>
                   </button>
                 )

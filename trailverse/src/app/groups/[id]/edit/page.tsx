@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import { Mountain, Plus, Trash2 } from "lucide-react"
 import { getGroup, updateGroup, ItineraryDay } from "@/lib/api"
+import Navbar from "@/components/Navbar"
 
 export default function EditGroupPage() {
   const params = useParams()
@@ -115,36 +116,31 @@ export default function EditGroupPage() {
     }
   }
 
-  if (loading) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <div className="text-emerald-400 text-lg animate-pulse">Loading...</div>
-    </div>
-  )
-
-  if (notAuthorized) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <div className="text-red-400">Only the host can edit this group</div>
-    </div>
-  )
-
   return (
     <div className="min-h-screen bg-black text-white">
-
-      <nav className="w-full border-b border-white/10 bg-black/80 backdrop-blur-md fixed top-0 z-50">
-        <div className="max-w-3xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 text-white font-bold text-xl">
-            <Mountain className="w-6 h-6 text-emerald-400" />
-            TrailVerse
-          </Link>
-          <Link href={`/groups/${groupId}`} className="text-sm text-white/60 hover:text-white transition-colors">
-            Back to Group
-          </Link>
-        </div>
-      </nav>
+      <Navbar />
 
       <main className="max-w-3xl mx-auto px-6 pt-24 pb-16">
-        <h1 className="text-2xl font-bold text-white mb-1">Edit Trek Group</h1>
-        <p className="text-white/40 text-sm mb-8">Update the details for your group</p>
+        {loading ? (
+          <div className="animate-pulse space-y-6">
+            <div className="h-8 w-48 bg-white/10 rounded" />
+            <div className="h-4 w-64 bg-white/5 rounded" />
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 h-96" />
+          </div>
+        ) : notAuthorized ? (
+          <div className="min-h-[50vh] flex flex-col items-center justify-center text-center gap-4">
+            <p className="text-red-400 text-lg">Only the group host can edit this group.</p>
+            <Link
+              href={`/groups/${groupId}`}
+              className="bg-white/10 hover:bg-white/20 text-white text-sm px-5 py-2.5 rounded-xl transition-colors"
+            >
+              Back to Group
+            </Link>
+          </div>
+        ) : (
+          <>
+            <h1 className="text-2xl font-bold text-white mb-1">Edit Trek Group</h1>
+            <p className="text-white/40 text-sm mb-8">Update the details for your group</p>
 
         <form onSubmit={handleSubmit} className="space-y-6">
 
@@ -286,14 +282,16 @@ export default function EditGroupPage() {
             </div>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-white font-semibold py-3 rounded-full transition-colors"
-          >
-            {submitting ? "Saving..." : "Save Changes"}
-          </button>
-        </form>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-white font-semibold py-3 rounded-full transition-colors"
+            >
+              {submitting ? "Saving..." : "Save Changes"}
+            </button>
+          </form>
+          </>
+        )}
       </main>
     </div>
   )

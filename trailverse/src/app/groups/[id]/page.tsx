@@ -12,6 +12,7 @@ import {
   getGroup, joinGroup, addMember, getMessages, postMessage,
   getQueries, postQuery, postReply, leaveGroup,
 } from "@/lib/api"
+import Navbar from "@/components/Navbar"
 
 function subscribe(callback: () => void) {
   window.addEventListener("storage", callback)
@@ -225,37 +226,33 @@ export default function GroupDetailPage() {
     setExpandedQueries({ ...expandedQueries, [queryId]: !expandedQueries[queryId] })
   }
 
-  if (loading) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <div className="text-emerald-400 text-lg animate-pulse">Loading group...</div>
-    </div>
-  )
-
-  if (!group) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <div className="text-red-400">Group not found</div>
-    </div>
-  )
-
   return (
     <div className="min-h-screen bg-black text-white">
-
-      {/* NAVBAR */}
-      <nav className="w-full border-b border-white/10 bg-black/80 backdrop-blur-md fixed top-0 z-50">
-        <div className="max-w-4xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 text-white font-bold text-xl">
-            <Mountain className="w-6 h-6 text-emerald-400" />
-            TrailVerse
-          </Link>
-          <Link href="/groups" className="text-sm text-white/60 hover:text-white transition-colors">
-            Back to Groups
-          </Link>
-        </div>
-      </nav>
+      <Navbar />
 
       <main className="max-w-4xl mx-auto px-6 pt-24 pb-16 space-y-6">
-
-        {/* HEADER */}
+        {loading ? (
+          <div className="animate-pulse space-y-6">
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 h-48 space-y-3">
+              <div className="h-7 bg-white/10 rounded w-1/2" />
+              <div className="h-4 bg-white/5 rounded w-1/4" />
+              <div className="h-16 bg-white/5 rounded w-full" />
+            </div>
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 h-64" />
+          </div>
+        ) : !group ? (
+          <div className="min-h-[50vh] flex flex-col items-center justify-center text-center gap-4">
+            <p className="text-red-400 text-lg">Group not found</p>
+            <Link
+              href="/groups"
+              className="bg-white/10 hover:bg-white/20 text-white text-sm px-5 py-2.5 rounded-xl transition-colors"
+            >
+              Back to Groups
+            </Link>
+          </div>
+        ) : (
+          <>
+            {/* HEADER */}
         <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div>
@@ -531,6 +528,9 @@ export default function GroupDetailPage() {
               </div>
             )}
           </div>
+        )}
+
+        </>
         )}
 
       </main>

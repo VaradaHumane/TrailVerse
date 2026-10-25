@@ -1,9 +1,27 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { ArrowRight, Star } from "lucide-react"
+import { getPlatformStats } from "@/lib/api"
 
 export default function HeroSection() {
+  const [stats, setStats] = useState<{
+    total_trekkers: number
+    total_trails: number
+    total_groups: number
+  }>({
+    total_trekkers: 0,
+    total_trails: 27,
+    total_groups: 0,
+  })
+
+  useEffect(() => {
+    getPlatformStats()
+      .then((data) => setStats(data))
+      .catch(() => {})
+  }, [])
+
   return (
     // min-h-screen → takes up at least the full viewport height
     // pt-16 → padding top 64px (to account for the fixed navbar)
@@ -34,8 +52,8 @@ export default function HeroSection() {
 
         {/* Subheadline */}
         <p className="text-lg md:text-xl text-white/60 max-w-2xl mx-auto mb-10 leading-relaxed">
-          Build your trekker profile. Get AI-powered trek recommendations.
-          Join a community of 10,000+ trekkers across India.
+          Build your trekker profile. Get real-time weather and risk analysis.
+          Explore verified trails and join trekking groups.
         </p>
 
         {/* Call to action buttons */}
@@ -55,14 +73,13 @@ export default function HeroSection() {
           </Link>
         </div>
 
-        {/* Social proof numbers */}
+        {/* Real dynamic stats fetched from backend */}
         <div className="mt-16 flex flex-col sm:flex-row gap-8 justify-center">
           {[
-            { number: "10,000+", label: "Trekkers" },
-            { number: "500+", label: "Trails mapped" },
-            { number: "₹0", label: "Always free" },
+            { number: stats.total_trekkers.toLocaleString(), label: "Trekkers Joined" },
+            { number: stats.total_trails.toLocaleString(), label: "Trails Mapped" },
+            { number: stats.total_groups.toLocaleString(), label: "Trek Groups" },
           ].map((stat) => (
-            // .map() loops through the array and creates a component for each item
             <div key={stat.label} className="text-center">
               <div className="text-3xl font-bold text-white">{stat.number}</div>
               <div className="text-sm text-white/50 mt-1">{stat.label}</div>

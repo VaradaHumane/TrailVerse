@@ -1,10 +1,31 @@
 // Base URL of your FastAPI backend
-// In production this would be your deployed API URL
-const API_BASE = "http://localhost:8000"
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"
+
+// ── In-Memory Client Cache to eliminate slow navigation transitions ──
+const clientCache = new Map<string, { data: unknown; expiry: number }>()
+
+async function cachedGet<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
+  const hit = clientCache.get(key)
+  const now = Date.now()
+  if (hit && hit.expiry > now) {
+    return hit.data as T
+  }
+  const data = await fetcher()
+  clientCache.set(key, { data, expiry: now + ttlMs })
+  return data
+}
+
+export function invalidateApiCache(prefix?: string) {
+  if (!prefix) {
+    clientCache.clear()
+    return
+  }
+  for (const k of clientCache.keys()) {
+    if (k.startsWith(prefix)) clientCache.delete(k)
+  }
+}
 
 // ── AbortError helper ───────────────────────────────────────
-// Callers can check `if (err instanceof AbortError)` to distinguish
-// user-initiated cancellations from real failures.
 export class AbortError extends Error {
   readonly name = "AbortError"
   constructor(message = "Request was aborted") {
@@ -12,17 +33,55 @@ export class AbortError extends Error {
   }
 }
 
+// ── Fetch platform stats (trekkers, trails, groups) ──
+export async function getPlatformStats(): Promise<{
+  total_trekkers: number
+  total_trails: number
+  total_groups: number
+}> {
+  return cachedGet("stats", 15000, async () => {
+    const res = await fetch(`${API_BASE}/stats`)
+    if (!res.ok) return { total_trekkers: 0, total_trails: 27, total_groups: 0 }
+    return res.json()
+  })
+}
+
 // ── Fetch user profile ──
 export async function getUserProfile(username: string) {
-  const res = await fetch(`${API_BASE}/users/${username}`)
-  if (!res.ok) throw new Error("User not found")
-  return res.json()
+  return cachedGet(`user:${username.toLowerCase()}`, 10000, async () => {
+    const res = await fetch(`${API_BASE}/users/${username}`)
+    if (!res.ok) throw new Error("User not found")
+    return res.json()
+  })
 }
 
 // ── Fetch dashboard data ──
 export async function getDashboardData(username: string) {
-  const res = await fetch(`${API_BASE}/dashboard/${username}`)
-  if (!res.ok) throw new Error("Dashboard data not found")
+  return cachedGet(`dashboard:${username.toLowerCase()}`, 10000, async () => {
+    const res = await fetch(`${API_BASE}/dashboard/${username}`)
+    if (!res.ok) throw new Error("Dashboard data not found")
+    return res.json()
+  })
+}
+
+// ── Supabase OAuth Google Sync ──
+export async function syncOAuthUser(data: {
+  email: string
+  name?: string | null
+  avatar_url?: string | null
+  auth_id?: string | null
+  city?: string
+}) {
+  const res = await fetch(`${API_BASE}/auth/oauth-sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || "OAuth sync failed")
+  }
+  invalidateApiCache()
   return res.json()
 }
 
@@ -42,6 +101,7 @@ export async function signupUser(data: {
     const err = await res.json()
     throw new Error(err.detail || "Signup failed")
   }
+  invalidateApiCache()
   return res.json()
 }
 
@@ -60,6 +120,7 @@ export async function loginUser(data: {
   }
   return res.json()
 }
+
 
 // ── Trek Types ──────────────────────────────────────────────
 export type Trek = {
@@ -153,13 +214,16 @@ export async function createGroup(data: {
     const err = await res.json()
     throw new Error(err.detail || "Failed to create group")
   }
+  invalidateApiCache("groups")
   return res.json()
 }
 
 export async function listGroups() {
-  const res = await fetch(`${API_BASE}/groups`)
-  if (!res.ok) throw new Error("Failed to load groups")
-  return res.json()
+  return cachedGet("groups:list", 10000, async () => {
+    const res = await fetch(`${API_BASE}/groups`)
+    if (!res.ok) throw new Error("Failed to load groups")
+    return res.json()
+  })
 }
 
 export async function getGroup(groupId: string, viewerUsername?: string) {
@@ -181,6 +245,8 @@ export async function joinGroup(groupId: string, username: string) {
     const err = await res.json()
     throw new Error(err.detail || "Failed to join group")
   }
+  invalidateApiCache("groups")
+  invalidateApiCache("user:")
   return res.json()
 }
 

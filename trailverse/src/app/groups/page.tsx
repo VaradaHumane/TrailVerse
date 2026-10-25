@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { Mountain, Plus, Users, MapPin, IndianRupee } from "lucide-react"
+import { Plus, Users, MapPin, IndianRupee } from "lucide-react"
 import { listGroups } from "@/lib/api"
+import Navbar from "@/components/Navbar"
 
 type Group = {
   id: string
@@ -26,36 +27,15 @@ export default function GroupsPage() {
   useEffect(() => {
     listGroups()
       .then((data) => {
-        setGroups(data.groups)
+        setGroups(data.groups || [])
         setLoading(false)
       })
       .catch(() => setLoading(false))
   }, [])
 
-  if (loading) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <div className="text-emerald-400 text-lg animate-pulse">Loading groups...</div>
-    </div>
-  )
-
   return (
     <div className="min-h-screen bg-black text-white">
-
-      {/* NAVBAR */}
-      <nav className="w-full border-b border-white/10 bg-black/80 backdrop-blur-md fixed top-0 z-50">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 text-white font-bold text-xl">
-            <Mountain className="w-6 h-6 text-emerald-400" />
-            TrailVerse
-          </Link>
-          <Link
-            href="/dashboard"
-            className="text-sm text-white/60 hover:text-white transition-colors"
-          >
-            Dashboard
-          </Link>
-        </div>
-      </nav>
+      <Navbar />
 
       <main className="max-w-6xl mx-auto px-6 pt-24 pb-16">
 
@@ -76,9 +56,21 @@ export default function GroupsPage() {
         </div>
 
         {/* GROUPS GRID */}
-        {groups.length === 0 ? (
+        {loading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-pulse">
+            {[1, 2, 3, 4, 5, 6].map((i) => (
+              <div key={i} className="bg-white/5 border border-white/10 rounded-2xl p-6 h-52 space-y-3">
+                <div className="h-6 bg-white/10 rounded-md w-3/4" />
+                <div className="h-4 bg-white/5 rounded-md w-1/2" />
+                <div className="h-12 bg-white/5 rounded-md w-full" />
+                <div className="h-4 bg-white/10 rounded-md w-1/3 pt-2" />
+              </div>
+            ))}
+          </div>
+        ) : groups.length === 0 ? (
           <div className="bg-white/5 border border-white/10 rounded-2xl p-12 text-center">
-            <p className="text-white/30">No trek groups yet. Be the first to host one!</p>
+            <p className="text-white/40 mb-2">No trek groups active yet.</p>
+            <p className="text-white/30 text-sm">Host an upcoming trek and invite fellow trekkers to join!</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

@@ -4,6 +4,7 @@ import { useState, useSyncExternalStore } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Mountain, Menu, X, User, LogOut } from "lucide-react"
+import { supabase } from "@/lib/supabaseClient"
 
 function subscribe(callback: () => void) {
   window.addEventListener("storage", callback)
@@ -23,7 +24,12 @@ export default function Navbar() {
   const username = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut()
+    } catch (e) {
+      console.warn("Supabase sign out:", e)
+    }
     localStorage.removeItem("username")
     window.dispatchEvent(new Event("storage"))
     router.push("/")
