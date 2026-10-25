@@ -456,3 +456,121 @@ export async function settleExpense(groupId: string, data: {
   }
   return res.json()
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// RISK PREDICTION & TRAIL PROGRESSION TYPES & CLIENT
+// ═══════════════════════════════════════════════════════════════════
+
+export type GeneralRiskData = {
+  score: number
+  label: "Low Risk" | "Moderate Risk" | "High Risk" | "Severe Hazard"
+  color: "emerald" | "amber" | "red" | "rose"
+  gradient_m_per_km: number
+  terrain_hazards: string[]
+  contributing_factors: { label: string; severity: string }[]
+  recommended_gear: string[]
+  emergency_notes: string
+}
+
+export type PersonalizedRiskData = {
+  personal_difficulty_score: number
+  readiness_percentage: number
+  verdict: string
+  color: "emerald" | "blue" | "amber" | "red"
+  personalized_advice: string
+  user_experience: {
+    treks_completed: number
+    trail_score: number
+    max_past_elevation: number
+    max_past_distance: number
+  }
+  experience_gap: {
+    elevation_delta_m: number
+    distance_delta_km: number
+    is_new_difficulty: boolean
+  }
+}
+
+export type TrekWithRisk = Trek & {
+  general_risk: GeneralRiskData
+  personalized_risk: PersonalizedRiskData | null
+}
+
+export type NextTrekProgression = {
+  is_first_timer: boolean
+  progression_stage: string
+  headline: string
+  trek: Trek
+  reason: string
+  readiness_percentage?: number
+  first_timer_checklist?: { title: string; desc: string }[]
+  next_step_action_plan?: { step: number; title: string; desc: string }[]
+  badge_target: {
+    title: string
+    points_reward: number
+    description: string
+  }
+}
+
+export type LeaderboardUser = {
+  rank: number
+  name: string
+  username: string
+  city: string
+  trail_score: number
+  tier: "Novice" | "Scout" | "Pathfinder" | "Mountaineer" | "Summit Master"
+  podium: "gold" | "silver" | "bronze" | null
+}
+
+export type LeaderboardResponse = {
+  scope: "city" | "state" | "national"
+  city: string | null
+  leaderboard: LeaderboardUser[]
+  viewer_stats: {
+    rank: number | null
+    trail_score: number
+    points_to_next_rank: number | null
+    total_trekkers: number
+  }
+}
+
+export async function getAllTreksWithRisk(username?: string): Promise<{ treks: TrekWithRisk[]; total: number }> {
+  const url = username
+    ? `${API_BASE}/treks/all-with-risk?username=${encodeURIComponent(username)}`
+    : `${API_BASE}/treks/all-with-risk`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error("Failed to load treks with risk assessment")
+  return res.json()
+}
+
+export async function getTrekRisk(trekId: string, username?: string): Promise<{
+  trek: Trek
+  general_risk: GeneralRiskData
+  personalized_risk: PersonalizedRiskData | null
+}> {
+  const url = username
+    ? `${API_BASE}/treks/${trekId}/risk?username=${encodeURIComponent(username)}`
+    : `${API_BASE}/treks/${trekId}/risk`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error("Failed to load trek risk")
+  return res.json()
+}
+
+export async function getLeaderboard(
+  scope: "city" | "state" | "national" = "national",
+  viewerUsername?: string,
+  city?: string
+): Promise<LeaderboardResponse> {
+  const params = new URLSearchParams({ scope })
+  if (viewerUsername) params.append("viewer_username", viewerUsername)
+  if (city) params.append("city", city)
+  const res = await fetch(`${API_BASE}/leaderboard?${params.toString()}`)
+  if (!res.ok) throw new Error("Failed to load leaderboard")
+  return res.json()
+}
+
+export async function getNextTrekRecommendation(username: string): Promise<NextTrekProgression> {
+  const res = await fetch(`${API_BASE}/recommendations/next-trek?username=${encodeURIComponent(username)}`)
+  if (!res.ok) throw new Error("Failed to load next trek progression")
+  return res.json()
+}

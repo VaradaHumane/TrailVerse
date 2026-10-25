@@ -161,6 +161,53 @@ def get_user(username: str):
         "badges": badges_result.data,
     }
 
+def format_leaderboard_entries(users_data: list, viewer_username: str | None = None) -> tuple[list, dict]:
+    ranked_list = []
+    viewer_stats = {
+        "rank": None,
+        "trail_score": 0,
+        "points_to_next_rank": None,
+        "total_trekkers": len(users_data)
+    }
+    
+    for idx, u in enumerate(users_data):
+        rank = idx + 1
+        score = int(u.get("trail_score") or 0)
+        
+        # Determine title tier
+        if score >= 3000:
+            tier = "Summit Master"
+        elif score >= 1500:
+            tier = "Mountaineer"
+        elif score >= 500:
+            tier = "Pathfinder"
+        elif score >= 200:
+            tier = "Scout"
+        else:
+            tier = "Novice"
+            
+        podium = "gold" if rank == 1 else "silver" if rank == 2 else "bronze" if rank == 3 else None
+        
+        entry = {
+            "rank": rank,
+            "name": u.get("name") or u.get("username"),
+            "username": u.get("username"),
+            "city": u.get("city") or "Trekker",
+            "trail_score": score,
+            "tier": tier,
+            "podium": podium,
+        }
+        ranked_list.append(entry)
+        
+        if viewer_username and u.get("username", "").lower() == viewer_username.lower():
+            viewer_stats["rank"] = rank
+            viewer_stats["trail_score"] = score
+            if idx > 0:
+                higher_score = int(users_data[idx - 1].get("trail_score") or 0)
+                viewer_stats["points_to_next_rank"] = max(1, higher_score - score + 1)
+                
+    return ranked_list, viewer_stats
+
 @app.get("/dashboard/{username}")
 def get_dashboard(username: str):
     user_result = supabase.table("users") \
@@ -173,22 +220,49 @@ def get_dashboard(username: str):
 
     user = user_result.data[0]
 
-    leaderboard_result = supabase.table("users") \
-        .select("name, username, trail_score") \
-        .eq("city", user["city"]) \
+    # Fetch user's trek history
+    history_res = supabase.table("user_treks").select("*, treks(name, difficulty, distance_km, elevation_m)").eq("user_id", user["id"]).execute()
+    user_history = history_res.data or []
+
+    # Fetch all treks for progression matching
+    all_treks_res = supabase.table("treks").select("*").execute()
+    all_treks = all_treks_res.data or []
+
+    # Compute Next Trek Progression recommendation
+    progression = compute_next_trek_recommendation(user, user_history, all_treks)
+
+    # City Leaderboard (fallback to national if city has fewer than 2 users)
+    city_leaderboard_res = supabase.table("users") \
+        .select("id, name, username, trail_score, city") \
+        .ilike("city", user["city"]) \
         .order("trail_score", desc=True) \
-        .limit(5) \
+        .limit(10) \
         .execute()
 
-    treks_result = supabase.table("treks") \
-        .select("*") \
-        .limit(5) \
+    city_users = city_leaderboard_res.data or []
+    if len(city_users) < 2:
+        nat_res = supabase.table("users").select("id, name, username, trail_score, city").order("trail_score", desc=True).limit(10).execute()
+        city_users = nat_res.data or []
+
+    # National Leaderboard
+    national_res = supabase.table("users") \
+        .select("id, name, username, trail_score, city") \
+        .order("trail_score", desc=True) \
+        .limit(10) \
         .execute()
+    national_users = national_res.data or []
+
+    city_ranked, city_viewer_stats = format_leaderboard_entries(city_users, user.get("username"))
+    national_ranked, national_viewer_stats = format_leaderboard_entries(national_users, user.get("username"))
 
     return {
         "user": user,
-        "leaderboard": leaderboard_result.data,
-        "recommended_trek": treks_result.data[0] if treks_result.data else None,
+        "leaderboard": city_ranked,
+        "national_leaderboard": national_ranked,
+        "city_viewer_stats": city_viewer_stats,
+        "national_viewer_stats": national_viewer_stats,
+        "recommended_trek": progression.get("trek"),
+        "next_trek_progression": progression,
     }
 
 
@@ -1511,6 +1585,494 @@ async def get_trek_weather(lat: float, lon: float):
     # Weather and risk data must not be cached longer than 10 minutes (600s)
     set_cached_result(cache_key, response_data, ttl=WEATHER_CACHE_TTL)
     return response_data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AI RISK PREDICTION ENGINE (GENERAL & PERSONALIZED)
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_general_trail_risk(trek: dict, weather: dict = None) -> dict:
+    """
+    1. GENERAL RISK PREDICTOR (Objective / Environmental)
+    Predicts the objective hazard level of a trek without accounting for personal experience.
+    Directly evaluates:
+      - Elevation & altitude AMS exposure
+      - Distance & endurance fatigue risk
+      - Trail steepness / gradient ratio (elevation_m / distance_km)
+      - Physical terrain difficulty (Easy, Medium, Hard, Extreme)
+      - Real-time or local weather signals (rainfall, wind shear, extreme heat/cold)
+    """
+    elevation = float(trek.get("elevation_m") or 800)
+    distance = max(float(trek.get("distance_km") or 8), 1.0)
+    difficulty = str(trek.get("difficulty") or "Medium").capitalize()
+    
+    gradient = elevation / distance  # meters climbed per kilometer
+    
+    score = 0
+    factors = []
+    hazards = []
+    gear = []
+    
+    # 1. Elevation Hazards
+    if elevation >= 2500:
+        score += 30
+        factors.append({"label": f"High Himalayan altitude ({int(elevation)}m) — Acute Mountain Sickness (AMS) & oxygen drop", "severity": "high"})
+        hazards.append("Acute Mountain Sickness (AMS) risk above 2,500m")
+        gear.extend(["Diamox / Altitude medication", "Thermal windcheater (-5°C rated)", "Pulse oximeter"])
+    elif elevation >= 1500:
+        score += 18
+        factors.append({"label": f"Elevated Sahyadri summit ({int(elevation)}m) — cold ridge winds & sudden cloud envelopment", "severity": "medium"})
+        hazards.append("High ridge wind exposure & sudden mist")
+        gear.extend(["Lightweight windcheater", "Electrolyte hydration packs"])
+    elif elevation >= 1100:
+        score += 10
+        factors.append({"label": f"Moderate mountain altitude ({int(elevation)}m) — continuous cardiovascular ascent", "severity": "low"})
+        hazards.append("Sustained uphill muscle exertion")
+        gear.append("2L Hydration bladder")
+    else:
+        score += 4
+        factors.append({"label": f"Low altitude trail ({int(elevation)}m) — accessible rolling topography", "severity": "low"})
+        hazards.append("Mild cardiovascular load")
+    
+    # 2. Distance Hazards
+    if distance >= 18:
+        score += 25
+        factors.append({"label": f"Endurance ultra trail ({distance:.1f}km) — high dehydration risk & delayed rescue turnaround", "severity": "high"})
+        hazards.append("Extreme physical depletion & potential nightfall traversal")
+        gear.extend(["Rechargeable headlamp (150+ lumens)", "3L Hydration reservoir", "Fast-acting carbohydrate gels"])
+    elif distance >= 12:
+        score += 15
+        factors.append({"label": f"Substantial endurance route ({distance:.1f}km) — typically 5 to 7 hours active trek", "severity": "medium"})
+        hazards.append("Sole abrasion & calf muscle cramping")
+        gear.extend(["Trek poles with rubber tips", "First-aid blister tape"])
+    elif distance >= 8:
+        score += 8
+        factors.append({"label": f"Moderate distance ({distance:.1f}km) — 3 to 4 hours on foot", "severity": "low"})
+    else:
+        score += 3
+        factors.append({"label": f"Short scenic hike ({distance:.1f}km) — manageable under 3 hours", "severity": "low"})
+        
+    # 3. Gradient / Steepness Hazards (m gained per km)
+    if gradient >= 100:
+        score += 25
+        factors.append({"label": f"Near-vertical rock gradient ({gradient:.0f}m gain/km) — steep rock-cut stairs & exposure fall hazard", "severity": "high"})
+        hazards.append("Near-vertical rock steps & unprotected cliff edges")
+        gear.append("High-ankle hiking boots with deep rubber lug traction")
+    elif gradient >= 70:
+        score += 15
+        factors.append({"label": f"Demanding uphill mountain gradient ({gradient:.0f}m gain/km)", "severity": "medium"})
+        hazards.append("Loose scree & unstable gravel slippage")
+        gear.append("Trek pole for knee stabilization")
+    elif gradient >= 40:
+        score += 8
+        factors.append({"label": f"Steady incline ({gradient:.0f}m gain/km)", "severity": "low"})
+    else:
+        score += 3
+
+    # 4. Difficulty Classification
+    if difficulty in ["Hard", "Extreme"]:
+        score += 15
+        hazards.append("Technical scrambling / rock chimney sections")
+    elif difficulty in ["Medium", "Moderate"]:
+        score += 8
+    else:
+        score += 2
+        
+    # 5. Live/Regional Weather Integration
+    if weather and isinstance(weather, dict):
+        weather_risk = _compute_trek_risk(weather)
+        if weather_risk.get("score") is not None:
+            w_score = weather_risk["score"]
+            score = int((score * 0.7) + (w_score * 0.3))
+            for f in weather_risk.get("factors", []):
+                factors.append({"label": f"Weather Signal: {f['label']}", "severity": f.get("severity", "medium")})
+    
+    score = min(max(score, 5), 100)
+    
+    if score >= 65:
+        label = "High Risk"
+        color = "red"
+    elif score >= 35:
+        label = "Moderate Risk"
+        color = "amber"
+    else:
+        label = "Low Risk"
+        color = "emerald"
+        
+    unique_gear = list(dict.fromkeys(gear))
+    if not unique_gear:
+        unique_gear = ["Sturdy trail shoes with lug traction", "1.5L Drinking water bottle", "Breathable daypack"]
+        
+    return {
+        "score": score,
+        "label": label,
+        "color": color,
+        "gradient_m_per_km": round(gradient, 1),
+        "terrain_hazards": hazards,
+        "contributing_factors": factors,
+        "recommended_gear": unique_gear,
+        "emergency_notes": f"Trail located in {trek.get('location', 'Mountain range')}. Keep phone battery above 70% and carry a whistle for emergency fog signaling."
+    }
+
+
+def compute_personalized_trail_risk(trek: dict, user: dict, trek_history: list = None) -> dict:
+    """
+    2. PERSONALIZED RISK & DIFFICULTY PREDICTOR (User-Centric)
+    Predicts the difficulty and risk of a trek specifically tailored to the user's profile.
+    Accounts for:
+      - Number of completed summits logged
+      - User's Trail Score
+      - Maximum past elevation and distance conquered
+      - Difficulty tier experience leap
+    """
+    history = trek_history or []
+    completed_count = len(history)
+    trail_score = int(user.get("trail_score") or 0)
+    
+    target_elevation = float(trek.get("elevation_m") or 800)
+    target_distance = float(trek.get("distance_km") or 8)
+    target_difficulty = str(trek.get("difficulty") or "Medium").capitalize()
+    
+    past_elevations = []
+    past_distances = []
+    past_difficulties = set()
+    
+    for h in history:
+        t_info = h.get("treks") or {}
+        elev = t_info.get("elevation_m") or h.get("elevation_m")
+        dist = t_info.get("distance_km") or h.get("distance_km")
+        diff = t_info.get("difficulty") or h.get("difficulty")
+        if elev: past_elevations.append(float(elev))
+        if dist: past_distances.append(float(dist))
+        if diff: past_difficulties.add(str(diff).capitalize())
+        
+    max_past_elevation = max(past_elevations) if past_elevations else 0.0
+    max_past_distance = max(past_distances) if past_distances else 0.0
+    
+    # ── CASE 1: Brand New User / Zero Profile Data ──
+    if completed_count == 0 and trail_score == 0:
+        if target_difficulty == "Easy" and target_elevation <= 1100:
+            score = 25
+            readiness = 90
+            verdict = "Ideal Starter Trek for You"
+            color = "emerald"
+            advice = f"As a first-time trekker on TrailVerse, {trek.get('name')} is an excellent entry point. Gentle gradient, scenic views, and well-marked paths make it safe and rewarding."
+        elif target_difficulty in ["Medium", "Moderate"] and target_elevation <= 1400:
+            score = 55
+            readiness = 65
+            verdict = "Moderate First Challenge"
+            color = "amber"
+            advice = f"You haven't logged any previous treks yet. {trek.get('name')} ({int(target_elevation)}m) requires solid cardiovascular fitness. We recommend doing light jogging for 3 days prior."
+        else:
+            score = 80
+            readiness = 40
+            verdict = "High Risk for New Trekkers"
+            color = "red"
+            advice = f"{trek.get('name')} is a {target_difficulty} trail with {int(target_elevation)}m elevation. We strongly recommend conquering 1-2 Easy trails (like Lohagad or Sinhagad) before attempting this summit."
+            
+        return {
+            "personal_difficulty_score": score,
+            "readiness_percentage": readiness,
+            "verdict": verdict,
+            "color": color,
+            "personalized_advice": advice,
+            "user_experience": {
+                "treks_completed": 0,
+                "trail_score": 0,
+                "max_past_elevation": 0,
+                "max_past_distance": 0,
+            },
+            "experience_gap": {
+                "elevation_delta_m": int(target_elevation),
+                "distance_delta_km": round(target_distance, 1),
+                "is_new_difficulty": True,
+            }
+        }
+        
+    # ── CASE 2: Active User with Demonstrated Experience ──
+    elevation_delta = max(0.0, target_elevation - max_past_elevation)
+    distance_delta = max(0.0, target_distance - max_past_distance)
+    has_conquered_difficulty = target_difficulty in past_difficulties
+    
+    readiness = 72.0
+    
+    # Trail Score Experience weighting
+    if trail_score >= 1000:
+        readiness += 15
+    elif trail_score >= 400:
+        readiness += 10
+    elif trail_score >= 100:
+        readiness += 5
+        
+    # Elevation delta deduction
+    if elevation_delta > 600:
+        readiness -= 25
+    elif elevation_delta > 300:
+        readiness -= 15
+    elif elevation_delta == 0:
+        readiness += 10
+        
+    # Distance delta deduction
+    if distance_delta > 6:
+        readiness -= 20
+    elif distance_delta > 3:
+        readiness -= 10
+    elif distance_delta == 0:
+        readiness += 5
+        
+    # Difficulty tier leap
+    if target_difficulty == "Hard" and not ("Hard" in past_difficulties or "Medium" in past_difficulties):
+        readiness -= 25
+    elif has_conquered_difficulty:
+        readiness += 10
+        
+    readiness = int(min(max(readiness, 15), 98))
+    score = 100 - readiness
+    
+    if readiness >= 85:
+        verdict = "Optimal Match for Your Fitness"
+        color = "emerald"
+        advice = f"You have already proven capability up to {int(max_past_elevation)}m and {round(max_past_distance, 1)}km. You are in prime condition to conquer {trek.get('name')}!"
+    elif readiness >= 70:
+        verdict = "Progressive Milestone"
+        color = "blue"
+        advice = f"Great next milestone! This pushes your elevation by +{int(elevation_delta)}m beyond your past max ({int(max_past_elevation)}m). Ensure adequate hydration."
+    elif readiness >= 50:
+        verdict = "Strenuous Challenge"
+        color = "amber"
+        advice = f"{trek.get('name')} exceeds your previous distance or elevation by a notable margin (+{int(elevation_delta)}m). Recommend trekking with a partner or group."
+    else:
+        verdict = "High Risk for Your Profile"
+        color = "red"
+        advice = f"Significant leap in difficulty from your past achievements. We recommend a stepping-stone trek first before attempting {trek.get('name')}."
+        
+    return {
+        "personal_difficulty_score": score,
+        "readiness_percentage": readiness,
+        "verdict": verdict,
+        "color": color,
+        "personalized_advice": advice,
+        "user_experience": {
+            "treks_completed": completed_count,
+            "trail_score": trail_score,
+            "max_past_elevation": int(max_past_elevation),
+            "max_past_distance": round(max_past_distance, 1),
+        },
+        "experience_gap": {
+            "elevation_delta_m": int(elevation_delta),
+            "distance_delta_km": round(distance_delta, 1),
+            "is_new_difficulty": not has_conquered_difficulty,
+        }
+    }
+
+
+def compute_next_trek_recommendation(user: dict, trek_history: list, all_treks: list) -> dict:
+    """
+    3. NEXT TREK PROGRESSION RECOMMENDER
+    Analyzes user profile to suggest the exact next trail/trek milestone.
+    If profile shows no data: suggests a curated easy starter trek with first-timer checklist.
+    If user has logged treks: suggests the optimal progressive milestone summit.
+    """
+    history = trek_history or []
+    completed_names = {h.get("treks", {}).get("name", "").strip().lower() for h in history if isinstance(h, dict) and h.get("treks")}
+    completed_names.update({(h.get("trek_name") or "").strip().lower() for h in history if isinstance(h, dict)})
+    
+    trail_score = int(user.get("trail_score") or 0)
+    
+    # ── CASE 1: Brand New User / Zero Profile Data ──
+    if len(history) == 0:
+        starter_candidates = [t for t in all_treks if t.get("difficulty") == "Easy" and (t.get("elevation_m") or 0) <= 1100]
+        chosen = starter_candidates[0] if starter_candidates else all_treks[0]
+        
+        return {
+            "is_first_timer": True,
+            "progression_stage": "Foundational First Trek",
+            "headline": f"Start Your Journey with {chosen['name']}",
+            "trek": chosen,
+            "reason": f"{chosen['name']} is the ideal trail for beginning your trekking journey in {chosen.get('state', 'Maharashtra')}. It features well-marked paths, gentle elevation ({chosen.get('elevation_m', 1000)}m), and stunning fortress panoramas to build your baseline confidence.",
+            "first_timer_checklist": [
+                {"title": "Footwear", "desc": "Wear broken-in athletic sneakers or hiking boots with rubber lug traction."},
+                {"title": "Hydration", "desc": "Carry at least 2.0 Litres of drinking water + electrolyte / ORS powder."},
+                {"title": "Timing", "desc": "Reach base village before 7:30 AM to ascend in cool morning weather."},
+                {"title": "Backpack Essentials", "desc": "Pack sun protection (hat, sunscreen), lightweight rain poncho, and energy snacks."}
+            ],
+            "badge_target": {
+                "title": "First Summit Badge",
+                "points_reward": 100,
+                "description": "Log this trek to unlock your verified explorer rank on the TrailVerse leaderboard!"
+            }
+        }
+        
+    # ── CASE 2: Active User with Experience ──
+    past_elevations = [h.get("treks", {}).get("elevation_m") or 800 for h in history if isinstance(h, dict) and h.get("treks")]
+    max_elev = max(past_elevations) if past_elevations else 800
+    
+    uncompleted = [t for t in all_treks if t.get("name", "").strip().lower() not in completed_names]
+    if not uncompleted:
+        uncompleted = all_treks
+        
+    target_trek = None
+    for diff_target in ["Medium", "Hard"]:
+        candidates = [t for t in uncompleted if t.get("difficulty") == diff_target and (t.get("elevation_m") or 0) >= max_elev]
+        if candidates:
+            candidates.sort(key=lambda x: x.get("elevation_m") or 0)
+            target_trek = candidates[0]
+            break
+            
+    if not target_trek:
+        uncompleted.sort(key=lambda x: x.get("elevation_m") or 0, reverse=True)
+        target_trek = uncompleted[0]
+        
+    target_elevation = target_trek.get("elevation_m") or 1000
+    elev_diff = target_elevation - max_elev
+    
+    return {
+        "is_first_timer": False,
+        "progression_stage": "Next Milestone Summit",
+        "headline": f"Ready for the Next Peak: {target_trek['name']}",
+        "trek": target_trek,
+        "reason": f"You've proven your endurance on {len(history)} previous summit(s) up to {int(max_elev)}m. {target_trek['name']} ({target_trek['difficulty']}, {target_elevation}m) offers the ideal progressive challenge (+{int(elev_diff)}m elevation gain) to elevate your Trail Score.",
+        "readiness_percentage": 85 if elev_diff <= 350 else 70,
+        "next_step_action_plan": [
+            {"step": 1, "title": "Endurance Conditioning", "desc": "Do 15 minutes of stair climbing or incline walking twice this week to prep your quads."},
+            {"step": 2, "title": "Check Weather & Risk", "desc": "Use the live Trail Risk Predictor on the Explore page 24 hours before heading out."},
+            {"step": 3, "title": "Coordinate Group or Buddy", "desc": "Post or join an RSVP in Trek Groups to split cabs and forest permits."}
+        ],
+        "badge_target": {
+            "title": "Altitude Milestone Badge",
+            "points_reward": 250,
+            "description": f"Conquer {target_trek['name']} to climb your city standings!"
+        }
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RISK & PROGRESSION API ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/treks/{trek_id}/risk")
+def get_trek_risk_assessment(trek_id: str, username: str | None = None):
+    """
+    Returns both:
+      1. General Risk Assessment (Objective / Environmental)
+      2. Personalized Risk Assessment (User-Centric, if username provided)
+    """
+    res = supabase.table("treks").select("*").eq("id", trek_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Trek not found")
+        
+    trek = res.data[0]
+    general_risk = compute_general_trail_risk(trek)
+    
+    personalized_risk = None
+    if username:
+        user_res = supabase.table("users").select("*").ilike("username", username).execute()
+        if user_res.data:
+            user = user_res.data[0]
+            treks_res = supabase.table("user_treks").select("*, treks(name, difficulty, distance_km, elevation_m)").eq("user_id", user["id"]).execute()
+            personalized_risk = compute_personalized_trail_risk(trek, user, treks_res.data or [])
+            
+    return {
+        "trek": trek,
+        "general_risk": general_risk,
+        "personalized_risk": personalized_risk,
+    }
+
+
+@app.get("/treks/all-with-risk")
+def get_all_treks_with_risk(username: str | None = None):
+    """
+    Returns all curated treks enriched with pre-calculated general risk scores
+    and personalized difficulty ratings for high-speed map and explore views (<25ms).
+    """
+    cache_key = f"treks_all_with_risk:{username or 'anon'}"
+    cached = get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
+    res = supabase.table("treks").select("*").execute()
+    treks = res.data or []
+    
+    user = None
+    user_history = []
+    if username:
+        user_res = supabase.table("users").select("*").ilike("username", username).execute()
+        if user_res.data:
+            user = user_res.data[0]
+            history_res = supabase.table("user_treks").select("*, treks(name, difficulty, distance_km, elevation_m)").eq("user_id", user["id"]).execute()
+            user_history = history_res.data or []
+            
+    enriched = []
+    for t in treks:
+        g_risk = compute_general_trail_risk(t)
+        p_risk = compute_personalized_trail_risk(t, user, user_history) if user else None
+        
+        item = dict(t)
+        item["general_risk"] = g_risk
+        item["personalized_risk"] = p_risk
+        enriched.append(item)
+        
+    response = {"treks": enriched, "total": len(enriched)}
+    set_cached_result(cache_key, response, ttl=60)
+    return response
+
+
+@app.get("/recommendations/next-trek")
+def get_next_trek_recommendation_endpoint(username: str):
+    """
+    Recommends the user's next trek step based on their profile and completed history.
+    If no history exists, suggests a verified easy starter trek with first-time checklist.
+    """
+    user_res = supabase.table("users").select("*").ilike("username", username).execute()
+    if not user_res.data:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    user = user_res.data[0]
+    history_res = supabase.table("user_treks").select("*, treks(name, difficulty, distance_km, elevation_m)").eq("user_id", user["id"]).execute()
+    all_treks_res = supabase.table("treks").select("*").execute()
+    
+    rec = compute_next_trek_recommendation(user, history_res.data or [], all_treks_res.data or [])
+    return rec
+
+
+# ═══════════════════════════════════════════════════════════════════
+# LEADERBOARD API ENDPOINT
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/leaderboard")
+def get_leaderboard_endpoint(
+    scope: str = Query("national", pattern="^(city|state|national)$"),
+    city: str | None = None,
+    viewer_username: str | None = None,
+    limit: int = 50
+):
+    """
+    Returns full leaderboard rankings across local city or national all-India scopes.
+    Calculates rankings, tiers (Novice, Scout, Pathfinder, Mountaineer, Summit Master),
+    podiums (gold, silver, bronze), and viewer's rank standing.
+    """
+    query = supabase.table("users").select("id, name, username, city, trail_score")
+    
+    if scope == "city" and city:
+        query = query.ilike("city", city)
+        
+    query = query.order("trail_score", desc=True).limit(limit)
+    res = query.execute()
+    users_data = res.data or []
+    
+    # Fallback if city has fewer than 2 users
+    if scope == "city" and len(users_data) < 2:
+        all_users_res = supabase.table("users").select("id, name, username, city, trail_score").order("trail_score", desc=True).limit(limit).execute()
+        users_data = all_users_res.data or []
+        
+    ranked_list, viewer_stats = format_leaderboard_entries(users_data, viewer_username)
+    return {
+        "scope": scope,
+        "city": city,
+        "leaderboard": ranked_list,
+        "viewer_stats": viewer_stats,
+    }
+
 
 
 

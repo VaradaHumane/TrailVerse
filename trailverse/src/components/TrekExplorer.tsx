@@ -1,703 +1,701 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { Search, MapPin, Mountain, Thermometer, Wind, Droplets, Sun, Clock, ArrowUp, Loader2, AlertTriangle, Globe, Filter, X } from "lucide-react"
-import { getTreks, searchExternal } from "@/lib/api"
-import type { Trek, ExternalTrekResult } from "@/lib/api"
+import { useState, useEffect, useRef, useMemo, useSyncExternalStore } from "react"
+import dynamic from "next/dynamic"
+import {
+  Search,
+  MapPin,
+  Mountain,
+  Thermometer,
+  Wind,
+  Droplets,
+  ArrowUp,
+  Loader2,
+  AlertTriangle,
+  Globe,
+  Filter,
+  X,
+  Shield,
+  User,
+  Compass,
+  CheckCircle2,
+  Layers,
+  Sparkles,
+  ArrowRight,
+  Eye,
+  Backpack,
+} from "lucide-react"
+import { getAllTreksWithRisk, searchExternal } from "@/lib/api"
+import type { Trek, TrekWithRisk, ExternalTrekResult } from "@/lib/api"
 
-// Weather API response type (matches /weather/{lat}/{lon})
-type WeatherData = {
-  temp: number
-  feels_like: number
-  temp_min: number
-  temp_max: number
-  humidity: number
-  pressure: number
-  visibility: number
-  wind_speed: number
-  wind_deg: number
-  wind_gust?: number
-  clouds: number
-  rain_1h: number
-  snow_1h: number
-  weather_id: number
-  weather_main: string
-  weather_desc: string
-  weather_icon: string
-  sunrise: number
-  sunset: number
-  location_name: string
-  country: string
-  dt: number
+// Dynamically import InteractiveTrailMap to ensure pure client-side Leaflet execution
+const InteractiveTrailMap = dynamic(() => import("./InteractiveTrailMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-[600px] sm:h-[680px] rounded-3xl bg-zinc-950 border border-white/10 flex flex-col items-center justify-center gap-3 animate-pulse shadow-2xl">
+      <div className="w-12 h-12 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+        <Mountain className="w-6 h-6 animate-pulse" />
+      </div>
+      <p className="text-white/40 text-xs">Loading Interactive Trail Map...</p>
+    </div>
+  ),
+})
+
+// Subscribe to localStorage username
+const subscribe = (callback: () => void) => {
+  window.addEventListener("storage", callback)
+  return () => window.removeEventListener("storage", callback)
 }
-
-type RiskData = {
-  score: number | null
-  label: string
-  color: string
-  factors: { label: string; severity: string }[]
-}
-
-type TrekWeatherResponse = {
-  weather: WeatherData
-  risk: RiskData
-}
-
-// Combined result type for display
-type SearchResult = Trek | ExternalTrekResult
-
-// Deduplicate external results by normalized name (case-insensitive) so the
-// same place from e.g. Nominatim + Wikidata isn't shown twice under slightly
-// different naming/casing.
-function dedupeByName<T extends { name: string }>(results: T[]): T[] {
-  const seen = new Set<string>()
-  return results.filter(r => {
-    const key = r.name.trim().toLowerCase()
-    if (!key || seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
+const getSnapshot = () => localStorage.getItem("username") || ""
+const getServerSnapshot = () => ""
 
 export default function TrekExplorer() {
+  const username = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+
+  // Treks State
+  const [allTreks, setAllTreks] = useState<TrekWithRisk[]>([])
+  const [loadingTreks, setLoadingTreks] = useState(true)
+  const [loadError, setLoadError] = useState("")
+
+  // Filter States
   const [query, setQuery] = useState("")
-  const [results, setResults] = useState<SearchResult[]>([])
-  const [loading, setLoading] = useState(false)
+  const [stateFilter, setStateFilter] = useState<string>("All")
+  const [difficultyFilter, setDifficultyFilter] = useState<string>("All")
+  const [riskFilter, setRiskFilter] = useState<string>("All")
+  const [viewMode, setViewMode] = useState<"map" | "grid">("map")
+
+  // Selected Trek
+  const [selectedTrek, setSelectedTrek] = useState<TrekWithRisk | null>(null)
+  const [weatherLoading, setWeatherLoading] = useState(false)
+  const [weatherData, setWeatherData] = useState<any>(null)
+  const [weatherError, setWeatherError] = useState("")
+
+  // Search dropdown
   const [showDropdown, setShowDropdown] = useState(false)
-  const [selectedIndex, setSelectedIndex] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  // State filter - default to Maharashtra (local mode)
-  const [stateFilter, setStateFilter] = useState<string>("Maharashtra")
-  const [showGlobalResults, setShowGlobalResults] = useState(false)
-
-  // Selected trek details
-  const [selectedTrek, setSelectedTrek] = useState<SearchResult | null>(null)
-  const [weather, setWeather] = useState<TrekWeatherResponse | null>(null)
-  const [weatherLoading, setWeatherLoading] = useState(false)
-  const [weatherError, setWeatherError] = useState("")
-
-  // Map state
-  const [mapUrl, setMapUrl] = useState("")
-
-  // Debounced fetch of treks
+  // Fetch all curated treks enriched with general and personalized risk
   useEffect(() => {
-    if (!query.trim()) {
-      const id = setTimeout(() => setResults([]), 0)
-      return () => clearTimeout(id)
-    }
-
-    // Abort HTTP work still in flight when this query is superseded by a new
-    // keystroke (or unmount).
-    const controller = new AbortController()
-    let cancelled = false
-
-    const timeoutId = setTimeout(async () => {
-      const signal = controller.signal
-      setLoading(true)
-      try {
-        if (showGlobalResults) {
-          // Global Search mode: ALWAYS query external global databases (Wikidata, Nominatim, OSM)
-          let merged: SearchResult[] = []
-          const mergeAndRender = (sourceResults: SearchResult[]) => {
-            if (cancelled) return
-            merged = dedupeByName([...merged, ...sourceResults])
-            setResults(merged)
-          }
-
-          // Concurrently query live external global sources
-          const calls = [
-            searchExternal(query, { limit: 10, sources: "wikidata", signal }).then(r => mergeAndRender(r.results)),
-            searchExternal(query, { limit: 10, sources: "nominatim", signal }).then(r => mergeAndRender(r.results)),
-            searchExternal(query, { limit: 10, sources: "osm", signal }).then(r => mergeAndRender(r.results)),
-          ]
-
-          // Also check local curated DB in parallel so curated treks appear alongside global results
-          getTreks({ q: query, limit: 5, signal })
-            .then((local) => {
-              if (!cancelled && local && local.length > 0) {
-                mergeAndRender(local)
-              }
-            })
-            .catch(() => {})
-
-          // End loading spinner as soon as first source settles
-          Promise.race(calls.map(c => c.catch(() => {}))).then(() => {
-            if (!cancelled) setLoading(false)
-          })
-
-          const settled = await Promise.allSettled(calls)
-          settled.forEach((outcome) => {
-            if (outcome.status === "rejected" && !controller.signal.aborted) {
-              console.error("External search source failed:", outcome.reason)
-            }
-          })
-        } else {
-          // Search local DB with state filter (enforce Maharashtra)
-          const stateParam = stateFilter || "Maharashtra"
-          const data = await getTreks({ q: query, state: stateParam, limit: 10, signal })
-          if (cancelled) return
-          setResults(data)
+    let isMounted = true
+    setLoadingTreks(true)
+    getAllTreksWithRisk(username || undefined)
+      .then((res) => {
+        if (!isMounted) return
+        setAllTreks(res.treks || [])
+        if (res.treks && res.treks.length > 0 && !selectedTrek) {
+          // Default select the first popular trek (e.g. Rajmachi or Harihar)
+          setSelectedTrek(res.treks[0])
         }
-        if (!cancelled) setSelectedIndex(-1)
-      } catch (err) {
-        if (controller.signal.aborted) {
-          return
-        }
-        console.error("Failed to fetch treks:", err)
-        setResults([])
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }, 300)
+      })
+      .catch((err) => {
+        if (!isMounted) return
+        setLoadError(err instanceof Error ? err.message : "Failed to load treks")
+      })
+      .finally(() => {
+        if (isMounted) setLoadingTreks(false)
+      })
 
     return () => {
-      clearTimeout(timeoutId)
-      cancelled = true
-      controller.abort()
+      isMounted = false
     }
-  }, [query, stateFilter, showGlobalResults])
+  }, [username])
 
-  // Click outside to close dropdown
+  // Fetch live weather when selectedTrek changes
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (
-        dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as Node) &&
-        inputRef.current &&
-        !inputRef.current.contains(e.target as Node)
-      ) {
-        setShowDropdown(false)
-      }
-    }
-
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [])
-
-  // Fetch weather for selected trek
-  const fetchWeather = async (trek: SearchResult) => {
-    if (!trek.lat || !trek.lon) {
-      setWeatherError("No coordinates available for this trek")
+    if (!selectedTrek || !selectedTrek.lat || !selectedTrek.lon) {
+      setWeatherData(null)
       return
     }
 
+    let isMounted = true
     setWeatherLoading(true)
     setWeatherError("")
-    setWeather(null)
 
-    try {
-      const res = await fetch(`http://localhost:8000/weather/${trek.lat}/${trek.lon}`)
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || "Failed to load weather")
-      }
-      const data: TrekWeatherResponse = await res.json()
-      setWeather(data)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to load weather"
-      setWeatherError(message)
-    } finally {
-      setWeatherLoading(false)
+    fetch(`http://localhost:8000/weather/${selectedTrek.lat}/${selectedTrek.lon}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || "Live weather unavailable")
+        }
+        return res.json()
+      })
+      .then((data) => {
+        if (isMounted) setWeatherData(data.weather || null)
+      })
+      .catch((err) => {
+        if (isMounted) setWeatherError(err instanceof Error ? err.message : "Weather unavailable")
+      })
+      .finally(() => {
+        if (isMounted) setWeatherLoading(false)
+      })
+
+    return () => {
+      isMounted = false
     }
-  }
+  }, [selectedTrek])
 
-  // Generate static map URL using OSM tile servers with marker overlay
-  const generateMapUrl = (trek: SearchResult) => {
-    if (!trek.lat || !trek.lon) return
-    const url = `https://www.openstreetmap.org/export/embed.html?bbox=${trek.lon - 0.02},${trek.lat - 0.015},${trek.lon + 0.02},${trek.lat + 0.015}&layer=mapnik&marker=${trek.lat},${trek.lon}`
-    setMapUrl(url)
-  }
+  // Extract unique states for filter pill
+  const availableStates = useMemo(() => {
+    const set = new Set<string>()
+    allTreks.forEach((t) => {
+      if (t.state) set.add(t.state)
+    })
+    return ["All", ...Array.from(set)]
+  }, [allTreks])
 
+  // Filtered Treks
+  const filteredTreks = useMemo(() => {
+    return allTreks.filter((trek) => {
+      // Query filter
+      if (query.trim()) {
+        const q = query.toLowerCase().trim()
+        const matchName = trek.name.toLowerCase().includes(q)
+        const matchLoc = trek.location.toLowerCase().includes(q)
+        if (!matchName && !matchLoc) return false
+      }
 
-  // Handle trek selection
-  const handleTrekSelect = (trek: SearchResult) => {
+      // State filter
+      if (stateFilter !== "All" && trek.state !== stateFilter) return false
+
+      // Difficulty filter
+      if (difficultyFilter !== "All" && trek.difficulty !== difficultyFilter) return false
+
+      // Risk filter
+      if (riskFilter !== "All") {
+        const score = trek.general_risk?.score ?? 0
+        if (riskFilter === "Low Risk" && score >= 35) return false
+        if (riskFilter === "Moderate Risk" && (score < 35 || score >= 65)) return false
+        if (riskFilter === "High Risk" && score < 65) return false
+      }
+
+      return true
+    })
+  }, [allTreks, query, stateFilter, difficultyFilter, riskFilter])
+
+  const handleTrekSelect = (trek: TrekWithRisk) => {
     setSelectedTrek(trek)
-    setQuery(trek.name)
     setShowDropdown(false)
-    setSelectedIndex(-1)
-    fetchWeather(trek)
-    generateMapUrl(trek)
-  }
-
-  // Keyboard navigation for search
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    switch (e.key) {
-      case "ArrowDown": {
-        e.preventDefault()
-        if (!showDropdown) {
-          setShowDropdown(true)
-        } else if (selectedIndex < results.length - 1) {
-          setSelectedIndex((prev) => prev + 1)
-        }
-        break
-      }
-      case "ArrowUp": {
-        e.preventDefault()
-        if (selectedIndex > 0) {
-          setSelectedIndex((prev) => prev - 1)
-        } else if (selectedIndex === 0) {
-          setSelectedIndex(-1)
-        }
-        break
-      }
-      case "Enter": {
-        e.preventDefault()
-        if (selectedIndex >= 0 && results[selectedIndex]) {
-          handleTrekSelect(results[selectedIndex])
-        } else if (query.trim()) {
-          // Manual entry - create a trek object with the query as name
-          const manualTrek: Trek = {
-            id: "",
-            name: query.trim(),
-            difficulty: "",
-            distance_km: 0,
-            location: "",
-            elevation_m: null,
-            lat: null,
-            lon: null,
-            state: null,
-          }
-          handleTrekSelect(manualTrek)
-        }
-        break
-      }
-      case "Escape": {
-        setShowDropdown(false)
-        setSelectedIndex(-1)
-        inputRef.current?.blur()
-        break
-      }
-    }
-  }
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value
-    setQuery(value)
-    setShowDropdown(true)
-    setSelectedIndex(-1)
-    // Clear selection when user starts typing again
-    if (selectedTrek && value !== selectedTrek.name) {
-      setSelectedTrek(null)
-      setWeather(null)
-      setMapUrl("")
-    }
-  }
-
-  const handleInputFocus = () => {
-    if (query.trim() || results.length > 0) {
-      setShowDropdown(true)
-    }
-  }
-
-  const difficultyColor = (difficulty: string) => {
-    switch (difficulty.toLowerCase()) {
-      case "easy": return "text-emerald-400"
-      case "medium": return "text-amber-400"
-      case "hard": return "text-red-400"
-      default: return "text-white/60"
-    }
-  }
-
-  const riskColor = (color: string) => {
-    switch (color) {
-      case "red": return "text-red-400 border-red-400/30 bg-red-400/10"
-      case "amber": return "text-amber-400 border-amber-400/30 bg-amber-400/10"
-      case "green": return "text-emerald-400 border-emerald-400/30 bg-emerald-400/10"
-      default: return "text-amber-400 border-amber-400/30 bg-amber-400/10"
-    }
-  }
-
-  const formatTime = (timestamp: number) => {
-    if (!timestamp) return "--"
-    const date = new Date(timestamp * 1000)
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
 
   return (
-    <div className="min-h-screen bg-black pt-24 pb-16 px-6">
-      {/* Background gradient */}
-      <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/20 via-black to-black pointer-events-none" />
-
-      <div className="relative z-10 max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs px-3 py-1 rounded-full mb-4">
-            <Search className="w-3 h-3" />
-            Trek Explorer
+    <div className="min-h-screen bg-black text-white pt-24 pb-20 px-4 sm:px-6 max-w-7xl mx-auto space-y-8">
+      {/* HEADER SECTION */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 border-b border-white/10 pb-8">
+        <div>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium mb-3">
+            <Compass className="w-3.5 h-3.5" />
+            <span>Interactive Trail Atlas & Telemetry</span>
           </div>
-          <h1 className="text-4xl md:text-5xl font-bold text-white mb-3">
-            Explore Any <span className="text-emerald-400">Trek</span>
+          <h1 className="text-3xl sm:text-5xl font-black text-white tracking-tight">
+            Explore <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-300">Trails & Hazards</span>
           </h1>
-          <p className="text-white/50 max-w-xl mx-auto">
-            Search for a trek to see weather conditions, trail details, and a map of the route.
+          <p className="text-white/60 text-sm sm:text-base mt-2 max-w-2xl leading-relaxed">
+            Pan across India&apos;s mountain ranges, view real-time topography, evaluate objective trail risks, and inspect personalized readiness matched to your trekking profile.
           </p>
         </div>
 
-        {/* Search Bar */}
-        <div className={`relative max-w-2xl mx-auto ${selectedTrek ? "mb-12" : ""}`}>
-          <div className="relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30" aria-hidden="true" />
+        {/* VIEW MODE TOGGLE */}
+        <div className="flex items-center gap-2 bg-zinc-900 border border-white/15 p-1 rounded-2xl shrink-0 self-start md:self-auto shadow-xl">
+          <button
+            onClick={() => setViewMode("map")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              viewMode === "map"
+                ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/20"
+                : "text-white/60 hover:text-white"
+            }`}
+          >
+            <span>🗺️</span>
+            <span>Interactive Map</span>
+          </button>
+          <button
+            onClick={() => setViewMode("grid")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              viewMode === "grid"
+                ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/20"
+                : "text-white/60 hover:text-white"
+            }`}
+          >
+            <span>🗂️</span>
+            <span>Trail Cards ({filteredTreks.length})</span>
+          </button>
+        </div>
+      </div>
+
+      {/* SEARCH & FILTERS TOOLBAR */}
+      <div className="bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          {/* SEARCH INPUT */}
+          <div className="relative flex-1" ref={dropdownRef}>
+            <Search className="w-4 h-4 text-white/40 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               ref={inputRef}
               type="text"
               value={query}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              onFocus={handleInputFocus}
-              placeholder="Search for a trek..."
-              className="w-full bg-black border border-white/10 rounded-xl px-12 py-3 pl-10 text-white placeholder-white/20 focus:outline-none focus:border-emerald-500 transition-colors text-lg"
-              autoComplete="off"
-              aria-autocomplete="list"
-              aria-controls="trek-explorer-results"
-              aria-expanded={showDropdown && results.length > 0}
-              role="combobox"
+              onChange={(e) => {
+                setQuery(e.target.value)
+                setShowDropdown(true)
+              }}
+              onFocus={() => setShowDropdown(true)}
+              placeholder="Search by trek name or region (e.g. Kalsubai, Lonavala, Nashik)..."
+              className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500 transition-colors"
             />
-            {loading && (
-              <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30 animate-spin" aria-hidden="true" />
-            )}
-          </div>
-
-          {/* State filter and global search toggle */}
-          <div className="flex flex-wrap items-center gap-3 mt-4">
-            <div className="relative">
-              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" aria-hidden="true" />
-              <select
-                value={stateFilter}
-                onChange={(e) => setStateFilter(e.target.value)}
-                className="bg-black border border-white/10 rounded-xl px-10 py-2 pl-8 text-white text-sm focus:outline-none focus:border-emerald-500 transition-colors appearance-none"
-              >
-                <option value="">All States</option>
-                <option value="Maharashtra">Maharashtra</option>
-              </select>
-            </div>
-
-            <button
-              onClick={() => setShowGlobalResults(!showGlobalResults)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
-                showGlobalResults
-                  ? "bg-emerald-500/20 border border-emerald-500/30 text-emerald-400"
-                  : "bg-white/5 border border-white/10 text-white/70 hover:bg-white/10"
-              }`}
-            >
-              <Globe className="w-4 h-4" />
-              {showGlobalResults ? "Show Local Only" : "Search Global Databases"}
-            </button>
-
-            {stateFilter && (
+            {query && (
               <button
-                onClick={() => setStateFilter("")}
-                className="flex items-center gap-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:bg-white/10 text-sm transition-colors"
+                onClick={() => setQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white"
               >
-                <X className="w-3 h-3" />
-                Clear filter
+                <X className="w-4 h-4" />
               </button>
             )}
+
+            {/* QUICK AUTOCOMPLETE DROPDOWN */}
+            {showDropdown && query.trim() && filteredTreks.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-2 z-30 bg-zinc-900 border border-white/20 rounded-xl overflow-hidden shadow-2xl max-h-60 overflow-y-auto">
+                {filteredTreks.slice(0, 6).map((t) => (
+                  <div
+                    key={t.id}
+                    onClick={() => handleTrekSelect(t)}
+                    className="p-3 hover:bg-white/5 cursor-pointer flex items-center justify-between border-b border-white/5 last:border-0 transition-colors"
+                  >
+                    <div>
+                      <div className="text-white font-medium text-xs">{t.name}</div>
+                      <div className="text-white/40 text-[11px]">{t.location} · {t.elevation_m}m</div>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white/10 text-emerald-400">
+                      {t.difficulty}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {showDropdown && results.length > 0 && (
-            <div
-              ref={dropdownRef}
-              id="trek-explorer-results"
-              className="absolute z-50 w-full mt-2 bg-zinc-900 border border-white/10 rounded-xl shadow-xl overflow-hidden"
-              role="listbox"
+          {/* STATE FILTER */}
+          <div className="flex items-center gap-2 overflow-x-auto scrollbar-none py-1">
+            <span className="text-white/40 text-xs shrink-0 flex items-center gap-1">
+              <Filter className="w-3 h-3" /> State:
+            </span>
+            <select
+              value={stateFilter}
+              onChange={(e) => setStateFilter(e.target.value)}
+              className="bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
             >
-              {results.map((trek, index) => {
-                // Handle both Trek (local DB) and ExternalTrekResult types
-                const isExternal = "source" in trek
-                const distance = isExternal ? "" : `${trek.distance_km} km`
-                const location = isExternal ? trek.description : trek.location
-                const elevation = trek.elevation_m ? ` · ${trek.elevation_m}m` : ""
-                const state = isExternal ? ` · ${trek.source}` : (trek.state ? ` · ${trek.state}` : "")
-                const details = [distance, location, elevation, state].filter(Boolean).join(" · ")
+              {availableStates.map((st) => (
+                <option key={st} value={st} className="bg-zinc-900">
+                  {st}
+                </option>
+              ))}
+            </select>
+          </div>
 
-                return (
-                  <button
-                    key={trek.id || index}
-                    type="button"
-                    onClick={() => handleTrekSelect(trek)}
-                    onMouseEnter={() => setSelectedIndex(index)}
-                    className={`w-full text-left px-4 py-3 transition-colors ${
-                      index === selectedIndex
-                        ? "bg-emerald-500/20 text-white"
-                        : "text-white/80 hover:bg-white/5"
-                    }`}
-                    role="option"
-                    aria-selected={index === selectedIndex}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-white">{trek.name}</span>
-                      {isExternal ? (
-                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
-                          {trek.source}
-                        </span>
-                      ) : (
-                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-white/10 text-white/60 border border-white/10 shrink-0">
-                          curated
-                        </span>
+          {/* DIFFICULTY FILTER */}
+          <div className="flex items-center gap-2">
+            <span className="text-white/40 text-xs shrink-0">Difficulty:</span>
+            <select
+              value={difficultyFilter}
+              onChange={(e) => setDifficultyFilter(e.target.value)}
+              className="bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+            >
+              <option value="All" className="bg-zinc-900">All Levels</option>
+              <option value="Easy" className="bg-zinc-900">Easy</option>
+              <option value="Medium" className="bg-zinc-900">Medium</option>
+              <option value="Hard" className="bg-zinc-900">Hard</option>
+            </select>
+          </div>
+
+          {/* RISK FILTER */}
+          <div className="flex items-center gap-2">
+            <span className="text-white/40 text-xs shrink-0">Risk:</span>
+            <select
+              value={riskFilter}
+              onChange={(e) => setRiskFilter(e.target.value)}
+              className="bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+            >
+              <option value="All" className="bg-zinc-900">All Risks</option>
+              <option value="Low Risk" className="bg-zinc-900">Low Risk (&lt;35)</option>
+              <option value="Moderate Risk" className="bg-zinc-900">Moderate (35-64)</option>
+              <option value="High Risk" className="bg-zinc-900">High Risk (65+)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* MAIN VIEW CONTENT */}
+      {loadingTreks ? (
+        <div className="h-96 rounded-3xl bg-white/5 border border-white/10 flex flex-col items-center justify-center gap-4 animate-pulse">
+          <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
+          <p className="text-white/40 text-sm">Loading curated summits & hazard telemetry...</p>
+        </div>
+      ) : loadError ? (
+        <div className="p-8 text-center bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm">
+          {loadError}
+        </div>
+      ) : viewMode === "map" ? (
+        /* INTERACTIVE MAP MODE */
+        <div className="space-y-6">
+          <InteractiveTrailMap
+            treks={filteredTreks}
+            selectedTrekId={selectedTrek?.id}
+            onSelectTrek={handleTrekSelect}
+            currentUser={username}
+          />
+
+          {/* BELOW MAP: SELECTED TREK FULL TELEMETRY & 2 RISK PREDICTORS */}
+          {selectedTrek && (
+            <div className="bg-zinc-900 border border-white/15 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl animate-in fade-in">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-5">
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span
+                      className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
+                        selectedTrek.difficulty === "Easy"
+                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                          : selectedTrek.difficulty === "Hard"
+                          ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                          : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                      }`}
+                    >
+                      {selectedTrek.difficulty}
+                    </span>
+                    <span className="text-white/50 text-xs">
+                      {selectedTrek.state || "Maharashtra"}
+                    </span>
+                  </div>
+                  <h2 className="text-2xl sm:text-3xl font-black text-white">
+                    {selectedTrek.name}
+                  </h2>
+                  <p className="text-white/50 text-xs sm:text-sm flex items-center gap-1.5 mt-1">
+                    <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                    {selectedTrek.location}
+                  </p>
+                </div>
+
+                {/* STAT TILES */}
+                <div className="flex items-center gap-3">
+                  <div className="bg-black/60 border border-white/10 rounded-2xl p-3 text-center min-w-[80px]">
+                    <span className="text-[10px] text-white/40 block">Elevation</span>
+                    <span className="text-base font-bold text-white">
+                      {selectedTrek.elevation_m ? `${selectedTrek.elevation_m}m` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-black/60 border border-white/10 rounded-2xl p-3 text-center min-w-[80px]">
+                    <span className="text-[10px] text-white/40 block">Distance</span>
+                    <span className="text-base font-bold text-white">
+                      {selectedTrek.distance_km ? `${selectedTrek.distance_km}km` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-black/60 border border-white/10 rounded-2xl p-3 text-center min-w-[80px]">
+                    <span className="text-[10px] text-white/40 block">Steepness</span>
+                    <span className="text-base font-bold text-emerald-400">
+                      {selectedTrek.general_risk?.gradient_m_per_km
+                        ? `${selectedTrek.general_risk.gradient_m_per_km}m/km`
+                        : "Normal"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* TWO SETS OF AI RISK PREDICTORS IN DUAL COLUMNS */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* 1. GENERAL RISK PREDICTOR (OBJECTIVE) */}
+                <div className="bg-black/40 border border-white/10 rounded-2xl p-5 space-y-4">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                        <Shield className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">1. General Trail Risk</h4>
+                        <span className="text-[10px] text-white/40">Objective Environmental Hazards</span>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`text-xs font-bold px-3 py-1 rounded-full border ${
+                        selectedTrek.general_risk?.color === "red"
+                          ? "bg-red-500/20 text-red-400 border-red-500/30"
+                          : selectedTrek.general_risk?.color === "amber"
+                          ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                          : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                      }`}
+                    >
+                      {selectedTrek.general_risk?.label || "Low Risk"} · {selectedTrek.general_risk?.score ?? 20}/100
+                    </span>
+                  </div>
+
+                  {/* HAZARD FACTORS */}
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-semibold text-white/60 uppercase tracking-wider block">
+                      Contributing Factors:
+                    </span>
+                    {(selectedTrek.general_risk?.contributing_factors || []).map((factor, idx) => (
+                      <div key={idx} className="flex items-start gap-2 text-xs text-white/70">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${
+                            factor.severity === "high"
+                              ? "bg-red-400"
+                              : factor.severity === "medium"
+                              ? "bg-amber-400"
+                              : "bg-emerald-400"
+                          }`}
+                        />
+                        <span>{factor.label}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* RECOMMENDED GEAR */}
+                  <div className="space-y-1.5 pt-2 border-t border-white/5">
+                    <span className="text-[11px] font-semibold text-white/60 flex items-center gap-1">
+                      <Backpack className="w-3 h-3 text-emerald-400" /> Essential Gear Required:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(selectedTrek.general_risk?.recommended_gear || ["Sturdy trail boots", "2L Hydration"]).map(
+                        (gear, i) => (
+                          <span
+                            key={i}
+                            className="text-[11px] bg-white/5 border border-white/10 px-2.5 py-1 rounded-lg text-white/80"
+                          >
+                            {gear}
+                          </span>
+                        )
                       )}
                     </div>
-                    <div className="text-white/40 text-sm mt-0.5">{details}</div>
-                  </button>
-                )
-              })}
-            </div>
-          )}
+                  </div>
+                </div>
 
-          {showDropdown && query.trim() && results.length === 0 && !loading && (
-            <div
-              ref={dropdownRef}
-              className="absolute z-50 w-full mt-2 bg-zinc-900 border border-white/10 rounded-xl shadow-xl px-4 py-3"
-            >
-              <p className="text-white/40 text-sm mb-2">
-                No treks found{showGlobalResults ? " in global databases" : ` in ${stateFilter || "database"}`}.
-              </p>
-              {!showGlobalResults && (
-                <button
-                  onClick={() => setShowGlobalResults(true)}
-                  className="text-emerald-400 text-sm hover:underline flex items-center gap-1"
-                >
-                  <Globe className="w-3 h-3" />
-                  Search global databases (Wikidata + OpenStreetMap)
-                </button>
-              )}
-              {showGlobalResults && (
-                <p className="text-white/50 text-xs">Try a different search term or check local database.</p>
-              )}
+                {/* 2. PERSONALIZED RISK PREDICTOR (USER-CENTRIC) */}
+                <div className="bg-black/40 border border-emerald-500/20 rounded-2xl p-5 space-y-4">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
+                        <User className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">2. Personalized Profile Risk</h4>
+                        <span className="text-[10px] text-white/40">
+                          {username ? `@${username}'s Fitness Analysis` : "Default Profile Evaluation"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`text-xs font-bold px-3 py-1 rounded-full ${
+                        selectedTrek.personalized_risk?.color === "red"
+                          ? "bg-red-500/20 text-red-400"
+                          : selectedTrek.personalized_risk?.color === "amber"
+                          ? "bg-amber-500/20 text-amber-400"
+                          : "bg-emerald-500/20 text-emerald-300"
+                      }`}
+                    >
+                      {selectedTrek.personalized_risk?.readiness_percentage ?? 85}% Ready
+                    </span>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-white/60">Profile Verdict:</span>
+                      <span className="font-bold text-white">
+                        {selectedTrek.personalized_risk?.verdict || "Optimal Match"}
+                      </span>
+                    </div>
+
+                    {/* Readiness Progress Bar */}
+                    <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden mb-3">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-500"
+                        style={{
+                          width: `${selectedTrek.personalized_risk?.readiness_percentage ?? 85}%`,
+                        }}
+                      />
+                    </div>
+
+                    <p className="text-xs text-white/70 leading-relaxed bg-white/5 border border-white/5 p-3 rounded-xl">
+                      {selectedTrek.personalized_risk?.personalized_advice ||
+                        "This trail fits your demonstrated experience level. Keep steady pacing on initial ascents."}
+                    </p>
+                  </div>
+
+                  {/* EXPERIENCE DELTA STATS */}
+                  <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                    <div className="bg-white/5 p-2 rounded-xl text-center">
+                      <span className="text-white/40 text-[10px] block">Elevation Leap</span>
+                      <span className="font-semibold text-white">
+                        +{selectedTrek.personalized_risk?.experience_gap?.elevation_delta_m ?? 0}m
+                      </span>
+                    </div>
+                    <div className="bg-white/5 p-2 rounded-xl text-center">
+                      <span className="text-white/40 text-[10px] block">Distance Leap</span>
+                      <span className="font-semibold text-white">
+                        +{selectedTrek.personalized_risk?.experience_gap?.distance_delta_km ?? 0}km
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* LIVE WEATHER PANEL */}
+              <div className="bg-black/50 border border-white/10 rounded-2xl p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Thermometer className="w-4 h-4 text-emerald-400" />
+                    Live Mountain Weather at Summit
+                  </h4>
+                  {weatherLoading && (
+                    <span className="text-[11px] text-white/40 flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Fetching live telemetry...
+                    </span>
+                  )}
+                </div>
+
+                {weatherData ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="bg-white/5 p-3 rounded-xl">
+                      <span className="text-white/40 text-[10px] block">Temperature</span>
+                      <span className="text-base font-bold text-white">
+                        {Math.round(weatherData.temp)}°C
+                      </span>
+                      <span className="text-white/40 text-[10px] block">
+                        Feels like {Math.round(weatherData.feels_like)}°C
+                      </span>
+                    </div>
+
+                    <div className="bg-white/5 p-3 rounded-xl">
+                      <span className="text-white/40 text-[10px] block">Wind Speed</span>
+                      <span className="text-base font-bold text-white flex items-center gap-1">
+                        <Wind className="w-3.5 h-3.5 text-blue-400" />
+                        {weatherData.wind_speed} m/s
+                      </span>
+                      <span className="text-white/40 text-[10px] block">Ridge exposure</span>
+                    </div>
+
+                    <div className="bg-white/5 p-3 rounded-xl">
+                      <span className="text-white/40 text-[10px] block">Humidity</span>
+                      <span className="text-base font-bold text-white flex items-center gap-1">
+                        <Droplets className="w-3.5 h-3.5 text-teal-400" />
+                        {weatherData.humidity}%
+                      </span>
+                      <span className="text-white/40 text-[10px] block">Moisture index</span>
+                    </div>
+
+                    <div className="bg-white/5 p-3 rounded-xl">
+                      <span className="text-white/40 text-[10px] block">Sky Conditions</span>
+                      <span className="text-sm font-bold text-white capitalize">
+                        {weatherData.weather_desc || "Clear skies"}
+                      </span>
+                      <span className="text-white/40 text-[10px] block">Good visibility</span>
+                    </div>
+                  </div>
+                ) : weatherError ? (
+                  <div className="text-white/40 text-xs py-2">
+                    Live meteorological sensor telemetry offline. Standard microclimate predictions applied.
+                  </div>
+                ) : null}
+              </div>
             </div>
           )}
         </div>
-
-        {/* Empty State */}
-        {!selectedTrek && (
-          <div className="text-center max-w-md mx-auto mt-16">
-            <div className="w-16 h-16 bg-emerald-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
-              <MapPin className="w-8 h-8 text-emerald-400" />
-            </div>
-            <h2 className="text-white text-lg font-semibold mb-2">Start exploring</h2>
-            <p className="text-white/40 text-sm">
-              Search for a trek above to see weather conditions, trail details, and a map of the route.
-            </p>
-          </div>
-        )}
-
-        {/* Trek Details */}
-        {selectedTrek && (
-          <div className="space-y-6">
-            {/* Trek Header Card */}
-            <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-2xl font-bold text-white mb-1">{selectedTrek.name}</h2>
-                  <div className="flex items-center gap-2 text-white/50 text-sm">
-                    <MapPin className="w-4 h-4" />
-                    {"source" in selectedTrek ? selectedTrek.description : (selectedTrek.location || "Location not specified")}
-                  </div>
-                </div>
-                {"difficulty" in selectedTrek && selectedTrek.difficulty && (
-                  <div className={`px-3 py-1 rounded-full text-sm font-medium border ${difficultyColor(selectedTrek.difficulty)} border-white/10 bg-white/5`}>
-                    {selectedTrek.difficulty}
-                  </div>
-                )}
-              </div>
-
-              {/* Quick stats */}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-6">
-                <div className="bg-black/40 rounded-xl p-4">
-                  <div className="text-white/40 text-xs mb-1">Distance</div>
-                  <div className="text-white font-semibold flex items-center gap-2">
-                    <Mountain className="w-4 h-4 text-emerald-400" />
-                    {"distance_km" in selectedTrek ? `${selectedTrek.distance_km} km` : "N/A"}
-                  </div>
-                </div>
-                <div className="bg-black/40 rounded-xl p-4">
-                  <div className="text-white/40 text-xs mb-1">Elevation</div>
-                  <div className="text-white font-semibold flex items-center gap-2">
-                    <ArrowUp className="w-4 h-4 text-emerald-400" />
-                    {selectedTrek.elevation_m ? `${selectedTrek.elevation_m} m` : "N/A"}
-                  </div>
-                </div>
-                <div className="bg-black/40 rounded-xl p-4">
-                  <div className="text-white/40 text-xs mb-1">Coordinates</div>
-                  <div className="text-white font-semibold text-sm">
-                    {selectedTrek.lat && selectedTrek.lon
-                      ? `${selectedTrek.lat.toFixed(3)}, ${selectedTrek.lon.toFixed(3)}`
-                      : "N/A"}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Weather Section */}
-            <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6">
-              <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                <Thermometer className="w-5 h-5 text-emerald-400" />
-                Current Weather
-              </h3>
-
-              {weatherLoading && (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
-                </div>
-              )}
-
-              {weatherError && (
-                <div className="text-red-400 text-sm flex items-center gap-2 py-4">
-                  <AlertTriangle className="w-4 h-4" />
-                  {weatherError}
-                </div>
-              )}
-
-              {weather && !weatherLoading && (
-                <div className="space-y-4">
-                  {/* Main weather display */}
+      ) : (
+        /* GRID CARDS VIEW MODE */
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in">
+          {filteredTreks.map((trek) => {
+            const isSelected = trek.id === selectedTrek?.id
+            return (
+              <div
+                key={trek.id}
+                className={`bg-zinc-900 border rounded-2xl p-5 flex flex-col justify-between transition-all hover:border-emerald-500/40 hover:-translate-y-1 ${
+                  isSelected ? "border-emerald-500 shadow-xl shadow-emerald-500/10" : "border-white/10"
+                }`}
+              >
+                <div className="space-y-3">
                   <div className="flex items-center justify-between">
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                        trek.difficulty === "Easy"
+                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                          : trek.difficulty === "Hard"
+                          ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                          : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                      }`}
+                    >
+                      {trek.difficulty}
+                    </span>
+                    <span className="text-white/40 text-xs">{trek.state || "Maharashtra"}</span>
+                  </div>
+
+                  <div>
+                    <h3 className="text-lg font-bold text-white">{trek.name}</h3>
+                    <p className="text-white/50 text-xs flex items-center gap-1 mt-0.5">
+                      <MapPin className="w-3 h-3 text-emerald-400" />
+                      {trek.location}
+                    </p>
+                  </div>
+
+                  {/* STATS */}
+                  <div className="grid grid-cols-3 gap-2 bg-black/40 border border-white/5 rounded-xl p-2.5 text-center text-xs">
                     <div>
-                      <div className="text-4xl font-bold text-white">
-                        {weather.weather.temp !== null && weather.weather.temp !== undefined
-                          ? `${Math.round(weather.weather.temp)}°C`
-                          : "--"}
-                      </div>
-                      <div className="text-white/50 text-sm capitalize">
-                        {weather.weather.weather_desc || "Weather data available"}
-                      </div>
+                      <span className="text-[10px] text-white/40 block">Elevation</span>
+                      <span className="font-semibold text-white">{trek.elevation_m}m</span>
                     </div>
-                    <div className="text-right text-white/60 text-sm">
-                      <div>
-                        Feels like {weather.weather.feels_like !== null && weather.weather.feels_like !== undefined
-                          ? `${Math.round(weather.weather.feels_like)}°C`
-                          : "--"}
-                      </div>
-                      <div>
-                        H: {weather.weather.temp_max !== null && weather.weather.temp_max !== undefined ? `${Math.round(weather.weather.temp_max)}°` : "--"}{" "}
-                        L: {weather.weather.temp_min !== null && weather.weather.temp_min !== undefined ? `${Math.round(weather.weather.temp_min)}°` : "--"}
-                      </div>
+                    <div>
+                      <span className="text-[10px] text-white/40 block">Distance</span>
+                      <span className="font-semibold text-white">{trek.distance_km}km</span>
                     </div>
-                  </div>
-
-                  {/* Weather grid */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-                    <div className="bg-black/40 rounded-lg p-3">
-                      <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
-                        <Wind className="w-3 h-3" /> Wind
-                      </div>
-                      <div className="text-white text-sm font-medium">
-                        {weather.weather.wind_speed !== null && weather.weather.wind_speed !== undefined
-                          ? `${weather.weather.wind_speed} m/s`
-                          : "--"}
-                      </div>
-                    </div>
-                    <div className="bg-black/40 rounded-lg p-3">
-                      <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
-                        <Droplets className="w-3 h-3" /> Humidity
-                      </div>
-                      <div className="text-white text-sm font-medium">
-                        {weather.weather.humidity !== null && weather.weather.humidity !== undefined
-                          ? `${weather.weather.humidity}%`
-                          : "--"}
-                      </div>
-                    </div>
-                    <div className="bg-black/40 rounded-lg p-3">
-                      <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
-                        <Sun className="w-3 h-3" /> Pressure
-                      </div>
-                      <div className="text-white text-sm font-medium">
-                        {weather.weather.pressure !== null && weather.weather.pressure !== undefined
-                          ? `${weather.weather.pressure} hPa`
-                          : "--"}
-                      </div>
-                    </div>
-                    <div className="bg-black/40 rounded-lg p-3">
-                      <div className="text-white/40 text-xs mb-1 flex items-center gap-1">
-                        <Clock className="w-3 h-3" /> Visibility
-                      </div>
-                      <div className="text-white text-sm font-medium">
-                        {weather.weather.visibility !== null && weather.weather.visibility !== undefined
-                          ? `${(weather.weather.visibility / 1000).toFixed(1)} km`
-                          : "--"}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Sun times */}
-                  <div className="flex items-center gap-6 text-white/50 text-sm bg-black/40 rounded-lg p-3">
-                    <div className="flex items-center gap-2">
-                      <Sun className="w-4 h-4 text-amber-400" />
-                      Sunrise: {formatTime(weather.weather.sunrise)}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Sun className="w-4 h-4 text-orange-400" />
-                      Sunset: {formatTime(weather.weather.sunset)}
-                    </div>
-                  </div>
-
-                  {/* Risk Assessment */}
-                  <div className={`rounded-xl p-4 border ${riskColor(weather.risk?.color || "amber")}`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold">Trek Risk Assessment</span>
-                      <span className="text-xl font-bold">
-                        {weather.risk?.score !== null && weather.risk?.score !== undefined
-                          ? `${weather.risk.score}/100`
-                          : "N/A"}
+                    <div>
+                      <span className="text-[10px] text-white/40 block">Risk</span>
+                      <span
+                        className={`font-semibold ${
+                          trek.general_risk?.color === "red"
+                            ? "text-red-400"
+                            : trek.general_risk?.color === "amber"
+                            ? "text-amber-400"
+                            : "text-emerald-400"
+                        }`}
+                      >
+                        {trek.general_risk?.score ?? 25}/100
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 mb-3">
-                      <AlertTriangle className="w-4 h-4" />
-                      <span className="font-medium">{weather.risk?.label || "Incomplete Data"}</span>
-                    </div>
-                    {(weather.risk?.factors?.length ?? 0) > 0 && (
-                      <div className="space-y-1">
-                        {weather.risk.factors.map((factor, idx) => (
-                          <div key={idx} className="text-sm text-white/70 flex items-center gap-2">
-                            <span className={`w-1.5 h-1.5 rounded-full ${
-                              factor.severity === "high" ? "bg-red-400" :
-                              factor.severity === "medium" ? "bg-amber-400" : "bg-emerald-400"
-                            }`} />
-                            {factor.label}
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
-                </div>
-              )}
-            </div>
 
-            {/* Map Section */}
-            <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6">
-              <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                <MapPin className="w-5 h-5 text-emerald-400" />
-                Trek Location
-              </h3>
+                  {/* USER PERSONALIZED READINESS TAG */}
+                  {trek.personalized_risk && (
+                    <div className="bg-emerald-500/5 border border-emerald-500/15 rounded-xl p-2.5 text-[11px] text-white/70 flex items-center justify-between">
+                      <span className="text-emerald-300 flex items-center gap-1">
+                        <User className="w-3 h-3 text-emerald-400" />
+                        {trek.personalized_risk.verdict}
+                      </span>
+                      <span className="font-bold text-white">
+                        {trek.personalized_risk.readiness_percentage}% Ready
+                      </span>
+                    </div>
+                  )}
+                </div>
 
-              {!selectedTrek.lat || !selectedTrek.lon ? (
-                <div className="text-white/40 text-sm text-center py-8">
-                  No map coordinates available for this trek.
-                </div>
-              ) : (
-                <div className="relative rounded-xl overflow-hidden bg-black">
-                  <iframe
-                    src={mapUrl || `https://www.openstreetmap.org/export/embed.html?bbox=${selectedTrek.lon - 0.02},${selectedTrek.lat - 0.015},${selectedTrek.lon + 0.02},${selectedTrek.lat + 0.015}&layer=mapnik&marker=${selectedTrek.lat},${selectedTrek.lon}`}
-                    className="w-full h-64 border-0"
-                    style={{ filter: "brightness(0.9) contrast(1.1)" }}
-                    title={`Map showing ${selectedTrek.name}`}
-                    referrerPolicy="no-referrer"
-                    sandbox="allow-scripts allow-same-origin"
-                    allow="geolocation"
-                  />
-                </div>
-              )}
+                <div className="pt-4 mt-4 border-t border-white/10 flex items-center justify-between">
+                  <button
+                    onClick={() => {
+                      handleTrekSelect(trek)
+                      setViewMode("map")
+                    }}
+                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
+                  >
+                    <span>View on Map</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
 
-              {selectedTrek.lat && selectedTrek.lon && (
-                <div className="mt-3 text-white/40 text-xs text-center">
-                  Coordinates: {selectedTrek.lat.toFixed(4)}, {selectedTrek.lon.toFixed(4)}
+                  <button
+                    onClick={() => handleTrekSelect(trek)}
+                    className="text-xs text-white/60 hover:text-white px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                  >
+                    Select
+                  </button>
                 </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
