@@ -7,20 +7,55 @@ import {
   Shield,
   User,
   Compass,
-  ArrowUpRight,
-  Sparkles,
-  ExternalLink,
-  ChevronRight,
+  ArrowDown,
   Layers,
   Thermometer,
   Wind,
   Droplets,
-  AlertTriangle,
-  CheckCircle2,
   X,
+  Loader2,
 } from "lucide-react"
-import type { TrekWithRisk } from "@/lib/api"
+import { type TrekWithRisk, getTrekWeather, type LiveWeatherData } from "@/lib/api"
 import "leaflet/dist/leaflet.css"
+
+// ── 100% FREE, ZERO-KEY, NO-WATERMARK TILE LAYERS ─────────────────────────
+// None of these require credit cards or API keys and have virtually unlimited hits.
+const TILE_LAYERS = {
+  dark: {
+    id: "dark",
+    name: "Dark Canvas",
+    icon: "🌙",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    attribution: '&copy; <a href="https://www.esri.com/">Esri</a> &copy; OpenStreetMap',
+    maxZoom: 16,
+  },
+  satellite: {
+    id: "satellite",
+    name: "Satellite",
+    icon: "🛰️",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, Earthstar Geographics',
+    maxZoom: 18,
+  },
+  topo: {
+    id: "topo",
+    name: "Topographic",
+    icon: "🏔️",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution: '&copy; <a href="https://www.esri.com/">Esri</a> &copy; OpenStreetMap',
+    maxZoom: 18,
+  },
+  osm: {
+    id: "osm",
+    name: "Street OSM",
+    icon: "🗺️",
+    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  },
+} as const
+
+type LayerKey = keyof typeof TILE_LAYERS
 
 type InteractiveTrailMapProps = {
   treks: TrekWithRisk[]
@@ -37,10 +72,16 @@ export default function InteractiveTrailMap({
 }: InteractiveTrailMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapInstanceRef = useRef<any>(null)
+  const tileLayerRef = useRef<any>(null)
   const markersRef = useRef<{ [key: string]: any }>({})
 
+  const [activeLayer, setActiveLayer] = useState<LayerKey>("dark")
   const [activeTrek, setActiveTrek] = useState<TrekWithRisk | null>(null)
   const [mapReady, setMapReady] = useState(false)
+
+  // Live popup weather state
+  const [popupWeather, setPopupWeather] = useState<LiveWeatherData | null>(null)
+  const [popupWeatherLoading, setPopupWeatherLoading] = useState(false)
 
   // Filter out treks without valid lat/lon
   const validTreks = useMemo(
@@ -71,11 +112,11 @@ export default function InteractiveTrailMap({
       // Add Zoom Control at bottom right
       L.control.zoom({ position: "bottomright" }).addTo(map)
 
-      // Add CartoDB Dark Matter tile layer for premium dark aesthetic
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-        attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; OpenStreetMap',
-        subdomains: "abcd",
-        maxZoom: 19,
+      // Add 100% Free ESRI Dark Canvas tile layer (NO WATERMARKS, NO API KEYS REQUIRED)
+      const defaultLayer = TILE_LAYERS.dark
+      tileLayerRef.current = L.tileLayer(defaultLayer.url, {
+        attribution: defaultLayer.attribution,
+        maxZoom: defaultLayer.maxZoom,
       }).addTo(map)
 
       mapInstanceRef.current = map
@@ -90,6 +131,24 @@ export default function InteractiveTrailMap({
       }
     }
   }, [])
+
+  // Handle Layer Switch
+  const switchTileLayer = (layerKey: LayerKey) => {
+    if (!mapInstanceRef.current || activeLayer === layerKey) return
+    setActiveLayer(layerKey)
+
+    import("leaflet").then((L) => {
+      if (!mapInstanceRef.current) return
+      if (tileLayerRef.current) {
+        mapInstanceRef.current.removeLayer(tileLayerRef.current)
+      }
+      const cfg = TILE_LAYERS[layerKey]
+      tileLayerRef.current = L.tileLayer(cfg.url, {
+        attribution: cfg.attribution,
+        maxZoom: cfg.maxZoom,
+      }).addTo(mapInstanceRef.current)
+    })
+  }
 
   // Update Markers on Map when treks or selectedTrekId change
   useEffect(() => {
@@ -112,7 +171,7 @@ export default function InteractiveTrailMap({
         const lon = trek.lon as number
         bounds.extend([lat, lon])
 
-        // Determine pin colors based on difficulty & risk
+        // Pin color by terrain difficulty
         const isSelected = trek.id === (activeTrek?.id || selectedTrekId)
         const difficultyColor =
           trek.difficulty === "Easy"
@@ -120,14 +179,6 @@ export default function InteractiveTrailMap({
             : trek.difficulty === "Hard"
             ? "#ef4444" // red
             : "#f59e0b" // amber
-
-        const riskScore = trek.general_risk?.score ?? 50
-        const riskColor =
-          riskScore >= 65
-            ? "#ef4444"
-            : riskScore >= 35
-            ? "#f59e0b"
-            : "#10b981"
 
         // Custom HTML Marker with glow pulse
         const iconHtml = `
@@ -200,7 +251,7 @@ export default function InteractiveTrailMap({
         marker.on("click", () => {
           setActiveTrek(trek)
           if (onSelectTrek) onSelectTrek(trek)
-          map.flyTo([lat, lon], Math.max(map.getZoom(), 11), { duration: 1.2 })
+          map.flyTo([lat, lon], Math.max(map.getZoom(), 11), { duration: 1.0 })
         })
 
         markersRef.current[trek.id] = marker
@@ -224,12 +275,55 @@ export default function InteractiveTrailMap({
     }
   }, [selectedTrekId, validTreks])
 
+  // Fetch live weather directly for active popup
+  useEffect(() => {
+    if (!activeTrek || typeof activeTrek.lat !== "number" || typeof activeTrek.lon !== "number") {
+      setPopupWeather(null)
+      return
+    }
+
+    let isMounted = true
+    setPopupWeatherLoading(true)
+
+    getTrekWeather(activeTrek.lat, activeTrek.lon)
+      .then((res) => {
+        if (isMounted && res.weather) {
+          setPopupWeather(res.weather)
+        }
+      })
+      .catch(() => {
+        if (isMounted) setPopupWeather(null)
+      })
+      .finally(() => {
+        if (isMounted) setPopupWeatherLoading(false)
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTrek])
+
+  // Action: Select and Scroll smoothly to the telemetry dashboard
+  const handleInspectTelemetry = () => {
+    if (!activeTrek) return
+    if (onSelectTrek) onSelectTrek(activeTrek)
+
+    setTimeout(() => {
+      const el = document.getElementById("trek-telemetry-panel")
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" })
+        el.classList.add("ring-2", "ring-emerald-400")
+        setTimeout(() => el.classList.remove("ring-2", "ring-emerald-400"), 2500)
+      }
+    }, 80)
+  }
+
   return (
     <div className="relative w-full h-[600px] sm:h-[680px] rounded-3xl overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl">
       {/* MAP CANVAS */}
       <div ref={mapContainerRef} className="w-full h-full z-0" />
 
-      {/* MAP CONTROLS / OVERLAY STATS */}
+      {/* TOP LEFT: ACTIVE SUMMITS BADGE */}
       <div className="absolute top-4 left-4 z-10 flex flex-wrap items-center gap-2 pointer-events-auto">
         <div className="bg-black/80 backdrop-blur-md border border-white/15 px-3 py-1.5 rounded-xl text-xs text-white flex items-center gap-2 shadow-lg">
           <Layers className="w-3.5 h-3.5 text-emerald-400" />
@@ -243,29 +337,54 @@ export default function InteractiveTrailMap({
         </div>
       </div>
 
-      {/* RESET VIEW BUTTON */}
-      <button
-        onClick={() => {
-          if (mapInstanceRef.current && validTreks.length > 0) {
-            import("leaflet").then((L) => {
-              const bounds = L.latLngBounds([])
-              validTreks.forEach((t) => bounds.extend([t.lat as number, t.lon as number]))
-              if (bounds.isValid()) {
-                mapInstanceRef.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 })
-                setActiveTrek(null)
-              }
-            })
-          }
-        }}
-        className="absolute top-4 right-4 z-10 bg-black/80 hover:bg-black border border-white/20 text-white/80 hover:text-white px-3 py-1.5 rounded-xl text-xs font-medium transition-all shadow-lg flex items-center gap-1.5"
-      >
-        <Compass className="w-3.5 h-3.5 text-emerald-400" />
-        Fit All Trails
-      </button>
+      {/* TOP RIGHT: 100% FREE MAP LAYER SWITCHER & RESET VIEW */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-2 pointer-events-auto">
+        <div className="bg-black/85 backdrop-blur-md border border-white/15 p-1 rounded-2xl flex items-center gap-1 shadow-xl">
+          {(Object.keys(TILE_LAYERS) as LayerKey[]).map((key) => {
+            const l = TILE_LAYERS[key]
+            const isCurrent = activeLayer === key
+            return (
+              <button
+                key={key}
+                onClick={() => switchTileLayer(key)}
+                title={`Switch to ${l.name} (100% Free / No Key)`}
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all ${
+                  isCurrent
+                    ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/20 font-semibold"
+                    : "text-white/60 hover:text-white hover:bg-white/10"
+                }`}
+              >
+                <span>{l.icon}</span>
+                <span className="hidden md:inline">{l.name}</span>
+              </button>
+            )
+          })}
+        </div>
+
+        <button
+          onClick={() => {
+            if (mapInstanceRef.current && validTreks.length > 0) {
+              import("leaflet").then((L) => {
+                const bounds = L.latLngBounds([])
+                validTreks.forEach((t) => bounds.extend([t.lat as number, t.lon as number]))
+                if (bounds.isValid()) {
+                  mapInstanceRef.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 })
+                  setActiveTrek(null)
+                }
+              })
+            }
+          }}
+          title="Fit All Summits"
+          className="bg-black/85 hover:bg-black border border-white/20 text-white/80 hover:text-white px-3 py-1.5 rounded-xl text-xs font-medium transition-all shadow-xl flex items-center gap-1.5"
+        >
+          <Compass className="w-3.5 h-3.5 text-emerald-400" />
+          <span className="hidden sm:inline">Fit All</span>
+        </button>
+      </div>
 
       {/* ACTIVE TREK INSPECTION POPUP CARD */}
       {activeTrek && (
-        <div className="absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-96 z-20 bg-zinc-900/95 backdrop-blur-xl border border-white/20 rounded-2xl p-5 shadow-2xl animate-in fade-in slide-in-from-bottom-4 space-y-4">
+        <div className="absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-96 z-20 bg-zinc-900/95 backdrop-blur-xl border border-white/20 rounded-2xl p-5 shadow-2xl animate-in fade-in slide-in-from-bottom-4 space-y-3.5">
           <div className="flex items-start justify-between gap-2">
             <div>
               <div className="flex items-center gap-2 mb-1">
@@ -302,7 +421,7 @@ export default function InteractiveTrailMap({
           </div>
 
           {/* TELEMETRY METRICS */}
-          <div className="grid grid-cols-3 gap-2 bg-black/50 border border-white/10 rounded-xl p-2.5 text-center">
+          <div className="grid grid-cols-3 gap-2 bg-black/50 border border-white/10 rounded-xl p-2 text-center">
             <div>
               <span className="text-[10px] text-white/40 block">Elevation</span>
               <span className="text-xs font-bold text-white">
@@ -325,13 +444,45 @@ export default function InteractiveTrailMap({
             </div>
           </div>
 
+          {/* LIVE MOUNTAIN WEATHER BAR */}
+          <div className="bg-black/60 border border-white/10 rounded-xl p-2.5 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <Thermometer className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div>
+                <span className="text-white font-semibold">
+                  {popupWeatherLoading ? (
+                    <span className="text-white/40 text-[11px] animate-pulse">Live telemetry...</span>
+                  ) : popupWeather ? (
+                    `${Math.round(popupWeather.temp)}°C · ${popupWeather.weather_desc || "Clear"}`
+                  ) : (
+                    "Live weather connected"
+                  )}
+                </span>
+                <span className="text-white/30 text-[10px] block">Real-time mountain data</span>
+              </div>
+            </div>
+
+            {popupWeather && (
+              <div className="flex items-center gap-2.5 text-white/60 text-[11px]">
+                <span className="flex items-center gap-1" title="Wind speed">
+                  <Wind className="w-3 h-3 text-cyan-400" />
+                  {popupWeather.wind_speed} m/s
+                </span>
+                <span className="flex items-center gap-1" title="Humidity">
+                  <Droplets className="w-3 h-3 text-blue-400" />
+                  {popupWeather.humidity}%
+                </span>
+              </div>
+            )}
+          </div>
+
           {/* TWO SETS OF AI RISK PREDICTORS */}
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             {/* 1. General Environmental Risk */}
-            <div className="bg-white/5 border border-white/10 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-1.5">
+            <div className="bg-white/5 border border-white/10 rounded-xl p-2.5">
+              <div className="flex items-center justify-between mb-1">
                 <span className="text-[11px] font-semibold text-white/80 flex items-center gap-1">
-                  <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                  <Shield className="w-3 h-3 text-emerald-400" />
                   General Trail Risk
                 </span>
                 <span
@@ -347,17 +498,17 @@ export default function InteractiveTrailMap({
                   {activeTrek.general_risk?.score ?? 20}/100)
                 </span>
               </div>
-              <p className="text-[11px] text-white/50 leading-relaxed">
-                {activeTrek.general_risk?.terrain_hazards?.[0] ||
-                  "Standard mountain trail without severe vertical exposure."}
+              <p className="text-[10px] text-white/50 leading-relaxed truncate">
+                {activeTrek.general_risk?.contributing_factors?.[0]?.label ||
+                  "Standard mountain route with manageable grade."}
               </p>
             </div>
 
             {/* 2. Personalized User Readiness Risk */}
-            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-1.5">
+            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-2.5">
+              <div className="flex items-center justify-between mb-1">
                 <span className="text-[11px] font-semibold text-emerald-300 flex items-center gap-1">
-                  <User className="w-3.5 h-3.5 text-emerald-400" />
+                  <User className="w-3 h-3 text-emerald-400" />
                   For Your Profile
                 </span>
                 <span
@@ -372,23 +523,20 @@ export default function InteractiveTrailMap({
                   {activeTrek.personalized_risk?.readiness_percentage ?? 85}% Ready
                 </span>
               </div>
-              <p className="text-[11px] text-white/60 leading-relaxed">
-                {activeTrek.personalized_risk?.personalized_advice ||
-                  "Ideal match based on your fitness level and mountain terrain."}
+              <p className="text-[10px] text-white/60 leading-relaxed truncate">
+                {activeTrek.personalized_risk?.verdict || "Optimal Progressive Step"}
               </p>
             </div>
           </div>
 
-          {/* ACTION BUTTON */}
-          <div className="flex items-center gap-2 pt-1">
+          {/* ACTION BUTTON: SELECT & SCROLL DIRECTLY TO DETAILED TELEMETRY */}
+          <div className="pt-1">
             <button
-              onClick={() => {
-                if (onSelectTrek) onSelectTrek(activeTrek)
-              }}
-              className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold py-2 px-3 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20"
+              onClick={handleInspectTelemetry}
+              className="w-full bg-emerald-500 hover:bg-emerald-400 text-white font-bold py-2.5 px-3 rounded-xl text-xs transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 active:scale-[0.98]"
             >
-              <span>Inspect Live Telemetry & Weather</span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
+              <span>Inspect Full Telemetry & Weather</span>
+              <ArrowDown className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>

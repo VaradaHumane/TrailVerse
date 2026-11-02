@@ -142,8 +142,15 @@ export type ExternalTrekResult = {
   lat: number | null
   lon: number | null
   elevation_m: number | null
-  description: string
-  source: "wikidata" | "osm" | "nominatim"
+  distance_km?: number
+  difficulty?: "Easy" | "Medium" | "Moderate" | "Hard"
+  state?: string
+  location?: string
+  description?: string
+  source?: string
+  general_risk?: GeneralRiskData
+  personalized_risk?: PersonalizedRiskData | null
+  in_india?: boolean
   osm_type?: string
   osm_id?: number
 }
@@ -170,15 +177,16 @@ export async function getTreks(
   return res.json()
 }
 
-// ── External search (Wikidata + OSM) ─────────────────────────
+// ── External search (Wikidata + OSM + Local) ─────────────────
 export async function searchExternal(
   q: string,
-  options?: { limit?: number; sources?: string; signal?: AbortSignal }
+  options?: { limit?: number; sources?: string; username?: string; signal?: AbortSignal }
 ): Promise<ExternalSearchResponse> {
   const searchParams = new URLSearchParams()
   searchParams.set("q", q)
   if (options?.limit) searchParams.set("limit", options.limit.toString())
   if (options?.sources) searchParams.set("sources", options.sources)
+  if (options?.username) searchParams.set("username", options.username)
   const url = `${API_BASE}/search/external?${searchParams.toString()}`
   const res = await fetch(url, { signal: options?.signal })
   if (!res.ok) throw new Error("Failed to search external databases")
@@ -573,4 +581,43 @@ export async function getNextTrekRecommendation(username: string): Promise<NextT
   const res = await fetch(`${API_BASE}/recommendations/next-trek?username=${encodeURIComponent(username)}`)
   if (!res.ok) throw new Error("Failed to load next trek progression")
   return res.json()
+}
+
+export type LiveWeatherData = {
+  temp: number
+  feels_like: number
+  temp_min?: number
+  temp_max?: number
+  humidity: number
+  pressure?: number
+  visibility?: number
+  wind_speed: number
+  wind_deg?: number
+  wind_gust?: number | null
+  clouds?: number
+  rain_1h?: number
+  weather_desc?: string
+  weather_main?: string
+  weather_icon?: string
+}
+
+export type TrekWeatherResponse = {
+  weather: LiveWeatherData
+  risk: {
+    score: number
+    label: string
+    color: string
+    factors: { label: string; severity: string }[]
+  }
+}
+
+export async function getTrekWeather(lat: number, lon: number): Promise<TrekWeatherResponse> {
+  return cachedGet(`weather:${lat.toFixed(3)}:${lon.toFixed(3)}`, 60000, async () => {
+    const res = await fetch(`${API_BASE}/weather/${lat}/${lon}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || "Live weather unavailable")
+    }
+    return res.json()
+  })
 }

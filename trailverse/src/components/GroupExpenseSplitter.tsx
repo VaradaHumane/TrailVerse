@@ -19,13 +19,13 @@ type Props = {
 }
 
 const CATEGORY_ICONS: Record<string, { label: string; icon: string; color: string }> = {
-  permit:    { label: "Permit & Entry", icon: "🎫", color: "text-purple-400 bg-purple-500/10 border-purple-500/20" },
+  permit: { label: "Permit & Entry", icon: "🎫", color: "text-purple-400 bg-purple-500/10 border-purple-500/20" },
   transport: { label: "Transport & Cab", icon: "🚐", color: "text-blue-400 bg-blue-500/10 border-blue-500/20" },
-  food:      { label: "Food & Ration", icon: "🍲", color: "text-amber-400 bg-amber-500/10 border-amber-500/20" },
-  guide:     { label: "Guide & Porter", icon: "🧭", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" },
-  stay:      { label: "Camping & Stay", icon: "⛺", color: "text-pink-400 bg-pink-500/10 border-pink-500/20" },
-  gear:      { label: "Gear & Rental", icon: "🎒", color: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20" },
-  other:     { label: "Miscellaneous", icon: "📦", color: "text-zinc-400 bg-white/5 border-white/10" },
+  food: { label: "Food & Ration", icon: "🍲", color: "text-amber-400 bg-amber-500/10 border-amber-500/20" },
+  guide: { label: "Guide & Porter", icon: "🧭", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" },
+  stay: { label: "Camping & Stay", icon: "⛺", color: "text-pink-400 bg-pink-500/10 border-pink-500/20" },
+  gear: { label: "Gear & Rental", icon: "🎒", color: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20" },
+  other: { label: "Miscellaneous", icon: "📦", color: "text-zinc-400 bg-white/5 border-white/10" },
 }
 
 export default function GroupExpenseSplitter({ groupId, currentUsername, isHost, members }: Props) {
@@ -261,13 +261,12 @@ export default function GroupExpenseSplitter({ groupId, currentUsername, isHost,
         </div>
 
         {/* User Balance */}
-        <div className={`border rounded-xl p-4 ${
-          myBalance > 0.01
+        <div className={`border rounded-xl p-4 ${myBalance > 0.01
             ? "bg-emerald-500/5 border-emerald-500/30 text-emerald-400"
             : myBalance < -0.01
-            ? "bg-red-500/5 border-red-500/30 text-red-400"
-            : "bg-black/40 border-white/10 text-white/50"
-        }`}>
+              ? "bg-red-500/5 border-red-500/30 text-red-400"
+              : "bg-black/40 border-white/10 text-white/50"
+          }`}>
           <div className="text-xs text-white/40 mb-1">Your Net Balance</div>
           <div className="text-2xl font-bold flex items-center">
             {myBalance > 0.01 ? (
@@ -308,13 +307,12 @@ export default function GroupExpenseSplitter({ groupId, currentUsername, isHost,
               return (
                 <div
                   key={idx}
-                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg border text-xs ${
-                    iOwe
+                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg border text-xs ${iOwe
                       ? "bg-red-500/10 border-red-500/20 text-white"
                       : owesMe
-                      ? "bg-emerald-500/10 border-emerald-500/20 text-white"
-                      : "bg-white/[0.02] border-white/5 text-white/70"
-                  }`}
+                        ? "bg-emerald-500/10 border-emerald-500/20 text-white"
+                        : "bg-white/[0.02] border-white/5 text-white/70"
+                    }`}
                 >
                   <div className="flex items-center gap-2">
                     <span className="font-semibold text-white">@{debt.from_user}</span>
@@ -351,11 +349,10 @@ export default function GroupExpenseSplitter({ groupId, currentUsername, isHost,
       <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none text-xs">
         <button
           onClick={() => setSelectedCategory("all")}
-          className={`px-3 py-1.5 rounded-lg border transition-colors ${
-            selectedCategory === "all"
+          className={`px-3 py-1.5 rounded-lg border transition-colors ${selectedCategory === "all"
               ? "bg-white text-black font-semibold border-white"
               : "bg-white/5 text-white/60 border-white/10 hover:border-white/20"
-          }`}
+            }`}
         >
           All ({data?.expenses.length || 0})
         </button>
@@ -368,11 +365,10 @@ export default function GroupExpenseSplitter({ groupId, currentUsername, isHost,
             <button
               key={key}
               onClick={() => setSelectedCategory(key)}
-              className={`px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5 shrink-0 ${
-                selectedCategory === key
+              className={`px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5 shrink-0 ${selectedCategory === key
                   ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40 font-semibold"
                   : "bg-white/5 text-white/60 border-white/10 hover:border-white/20"
-              }`}
+                }`}
             >
               <span>{item.icon}</span>
               <span>{item.label}</span>
@@ -514,18 +510,16 @@ export default function GroupExpenseSplitter({ groupId, currentUsername, isHost,
                   <button
                     type="button"
                     onClick={() => setSplitAll(true)}
-                    className={`flex-1 py-2 rounded-lg border text-center transition-colors ${
-                      splitAll ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-black/40 border-white/10 text-white/50"
-                    }`}
+                    className={`flex-1 py-2 rounded-lg border text-center transition-colors ${splitAll ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-black/40 border-white/10 text-white/50"
+                      }`}
                   >
                     Split All Members
                   </button>
                   <button
                     type="button"
                     onClick={() => setSplitAll(false)}
-                    className={`flex-1 py-2 rounded-lg border text-center transition-colors ${
-                      !splitAll ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-black/40 border-white/10 text-white/50"
-                    }`}
+                    className={`flex-1 py-2 rounded-lg border text-center transition-colors ${!splitAll ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-black/40 border-white/10 text-white/50"
+                      }`}
                   >
                     Custom Members
                   </button>

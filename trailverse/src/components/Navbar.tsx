@@ -49,6 +49,10 @@ export default function Navbar() {
           <Link href="/explore" className="text-sm text-white/70 hover:text-white transition-colors">
             Explore
           </Link>
+          <Link href="/search" className="text-sm text-white/70 hover:text-white transition-colors flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            Search
+          </Link>
           <Link href="/groups" className="text-sm text-white/70 hover:text-white transition-colors">
             Groups
           </Link>
@@ -110,6 +114,13 @@ export default function Navbar() {
             className="block text-sm text-white/80 hover:text-white py-1"
           >
             Explore
+          </Link>
+          <Link
+            href="/search"
+            onClick={() => setMobileMenuOpen(false)}
+            className="block text-sm text-emerald-400 font-medium hover:text-emerald-300 py-1"
+          >
+            🔍 All-India Search
           </Link>
           <Link
             href="/groups"
