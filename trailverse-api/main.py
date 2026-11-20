@@ -110,14 +110,32 @@ def set_cached_result(key: str, data: dict, ttl: int | None = None) -> bool:
     return _cache.set(key, data, ttl=ttl)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError(
+        "Critical Configuration Error: SUPABASE_SERVICE_ROLE_KEY is required to start the TrailVerse API. "
+        "Anon key fallback is forbidden."
+    )
+
+# Backend server client: Use SUPABASE_SERVICE_ROLE_KEY so operations succeed securely with RLS enabled
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # Service client for admin operations (bypasses RLS)
-supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_SERVICE_ROLE_KEY else supabase
+supabase_admin: Client = supabase
+
+# Dependency to protect admin routes
+from fastapi import Header, Depends
+import secrets
+
+def require_admin(x_admin_key: str = Header(None, alias="X-Admin-Key")):
+    admin_key = os.getenv("ADMIN_API_KEY")
+    if not admin_key:
+        raise HTTPException(status_code=503, detail="Admin API disabled: ADMIN_API_KEY not set")
+    if not x_admin_key or not secrets.compare_digest(x_admin_key.encode("utf-8"), admin_key.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+    return True
 
 app = FastAPI(title="TrailVerse API", version="1.0.0")
 
@@ -135,8 +153,9 @@ def root():
 
 @app.get("/users/{username}")
 def get_user(username: str):
+    # Select only public safe profile fields - strictly never leak password_hash or private data
     result = supabase.table("users") \
-        .select("*") \
+        .select("id, name, username, city, bio, trail_score, rank, photo, created_at") \
         .ilike("username", username) \
         .execute()
 
@@ -157,8 +176,8 @@ def get_user(username: str):
 
     return {
         "user": user,
-        "trek_history": treks_result.data,
-        "badges": badges_result.data,
+        "trek_history": treks_result.data or [],
+        "badges": badges_result.data or [],
     }
 
 def format_leaderboard_entries(users_data: list, viewer_username: str | None = None) -> tuple[list, dict]:
@@ -211,7 +230,7 @@ def format_leaderboard_entries(users_data: list, viewer_username: str | None = N
 @app.get("/dashboard/{username}")
 def get_dashboard(username: str):
     user_result = supabase.table("users") \
-        .select("*") \
+        .select("id, name, username, city, bio, trail_score, rank, photo, created_at") \
         .ilike("username", username) \
         .execute()
 
@@ -318,7 +337,7 @@ def list_treks(
     return result.data
 
 
-@app.get("/treks/{trek_id}/coordinates")
+@app.get("/admin/treks/{trek_id}/coordinates", dependencies=[Depends(require_admin)])
 def get_trek_coordinates(trek_id: str):
     """Get coordinates for a specific trek (if available)"""
     try:
@@ -330,7 +349,7 @@ def get_trek_coordinates(trek_id: str):
     return result.data[0]
 
 
-@app.patch("/treks/{trek_id}/coordinates")
+@app.patch("/admin/treks/{trek_id}/coordinates", dependencies=[Depends(require_admin)])
 def update_trek_coordinates(trek_id: str, lat: float, lon: float):
     """Update coordinates for a specific trek (admin only)"""
     # Check if trek exists
@@ -2161,7 +2180,7 @@ class TrekImportRequest(BaseModel):
     treks: list[dict]
 
 
-@app.post("/admin/treks/import")
+@app.post("/admin/treks/import", dependencies=[Depends(require_admin)])
 def import_treks(body: TrekImportRequest):
     """
     Admin endpoint to bulk import treks.
@@ -2222,57 +2241,8 @@ def import_treks(body: TrekImportRequest):
     }
 
 
-# ─── Admin: Execute Raw SQL (for migrations) ───
-class ExecuteSQLRequest(BaseModel):
-    sql: str
 
-
-@app.post("/admin/execute-sql")
-def execute_sql(body: ExecuteSQLRequest):
-    """
-    Admin endpoint to execute raw SQL (e.g., ALTER TABLE).
-    Uses the service role client via PostgREST RPC.
-    """
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=503, detail="Admin endpoint disabled: SUPABASE_SERVICE_ROLE_KEY not configured")
-
-    # Create a temporary function to execute arbitrary SQL, then call it
-    # This works around PostgREST not having direct SQL execution
-    try:
-        # First, create a temporary function that executes the SQL
-        func_sql = f"""
-        CREATE OR REPLACE FUNCTION temp_exec_sql()
-        RETURNS void
-        LANGUAGE plpgsql
-        SECURITY DEFINER
-        AS $$
-        BEGIN
-            {body.sql}
-        END;
-        $$;
-        """
-        # We can't execute this directly, but we can try RPC
-        # Let's try a different approach - use the supabase client's ability to run RPC
-        # Actually, we need to create the function first. Let's do it in two steps.
-
-        # Try to create the function via a migration approach
-        # For now, return the SQL for manual execution
-        return {
-            "success": False,
-            "error": "Direct SQL execution requires database function. Use Supabase Dashboard SQL Editor.",
-            "sql_to_run_manually": body.sql,
-            "hint": "Go to Supabase Dashboard > SQL Editor and run: " + body.sql
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "sql_to_run_manually": body.sql,
-            "hint": "Run this SQL in Supabase Dashboard > SQL Editor"
-        }
-
-
-@app.post("/admin/add-state-column")
+@app.post("/admin/add-state-column", dependencies=[Depends(require_admin)])
 def add_state_column():
     """
     Admin endpoint to add the state column to treks table.

@@ -18,8 +18,8 @@ API_BASE = "http://127.0.0.1:8000"
 SAFE_PROBES = {
     ("GET", "/"): ([200], None, None),
     ("GET", "/treks"): ([200], {"limit": 2}, None),
-    ("GET", "/treks/{trek_id}/coordinates"): ([404], None, None),
-    ("PATCH", "/treks/{trek_id}/coordinates"): ([422], None, {}),
+    ("GET", "/admin/treks/{trek_id}/coordinates"): ([401], None, None),
+    ("PATCH", "/admin/treks/{trek_id}/coordinates"): ([401], None, {}),
     ("POST", "/treks/log"): ([422], None, {}),
     ("GET", "/weather/{lat}/{lon}"): ([200], None, None),
     ("GET", "/groups"): ([200], None, None),
@@ -46,7 +46,6 @@ SAFE_PROBES = {
     ("POST", "/auth/signup"): ([422], None, {}),
     ("POST", "/admin/treks/import"): ([422, 503], None, {}),
     ("POST", "/admin/add-state-column"): ([200], None, {}),
-    ("POST", "/admin/execute-sql"): ([422], None, {}),
     ("GET", "/docs"): ([200], None, None),
     ("GET", "/docs/oauth2-redirect"): ([200], None, None),
     ("GET", "/redoc"): ([200], None, None),
